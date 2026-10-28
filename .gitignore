@@ -1,0 +1,20 @@
+# build artefacts
+out/
+build/
+*.o
+*.elf
+*.bin
+*.img
+*.dtb
+*.pre.dts
+*.cpio*
+payload*.bin
+
+# initramfs userland binaries are assembled from an Alpine rootfs, see
+# initramfs/README.md — never commit them
+initramfs/root/
+sky-initramfs.cpio.gz
+
+# editor / OS noise
+*~
+.DS_Store

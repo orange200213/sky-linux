@@ -1,0 +1,14 @@
+                    GNU GENERAL PUBLIC LICENSE
+                       Version 2, June 1991
+
+This project is distributed under the GNU General Public License version 2 (or
+later for the non-kernel parts), the same license as the Linux kernel.
+
+The kernel patches in kernel/ are GPL-2.0, matching the Linux kernel.
+
+The device tree file in dts/ follows the usual device tree convention and is
+BSD-3-Clause (see its SPDX header).
+
+The full text of the GPL-2.0 is available at
+https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+and in the LICENSE file of any Linux kernel source tree.

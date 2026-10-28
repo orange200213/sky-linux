@@ -1,0 +1,35 @@
+diff --git a/drivers/phy/qualcomm/phy-qcom-snps-femto-v2.c b/drivers/phy/qualcomm/phy-qcom-snps-femto-v2.c
+index 980ad1fb1..49f9927f7 100644
+--- a/drivers/phy/qualcomm/phy-qcom-snps-femto-v2.c
++++ b/drivers/phy/qualcomm/phy-qcom-snps-femto-v2.c
+@@ -231,6 +231,7 @@ static int qcom_snps_hsphy_set_mode(struct phy *phy, enum phy_mode mode,
+ {
+ 	struct qcom_snps_hsphy *hsphy = phy_get_drvdata(phy);
+ 
++	dev_info(&phy->dev, "sky: set_mode mode=%d submode=%d\n", mode, submode);
+ 	hsphy->mode = mode;
+ 	return 0;
+ }
+@@ -466,6 +467,13 @@ static int qcom_snps_hsphy_init(struct phy *phy)
+ 
+ 	hsphy->phy_initialized = true;
+ 
++	dev_info(&phy->dev, "sky: hsphy init regs cfg0=%08x utmi5=%08x com0=%08x com1=%08x ref=%08x\n",
++		 readl(hsphy->base + USB2_PHY_USB_PHY_CFG0),
++		 readl(hsphy->base + USB2_PHY_USB_PHY_UTMI_CTRL5),
++		 readl(hsphy->base + USB2_PHY_USB_PHY_HS_PHY_CTRL_COMMON0),
++		 readl(hsphy->base + USB2_PHY_USB_PHY_HS_PHY_CTRL_COMMON1),
++		 readl(hsphy->base + USB2_PHY_USB_PHY_REFCLK_CTRL));
++
+ 	return 0;
+ 
+ disable_clks:
+@@ -476,6 +484,8 @@ static int qcom_snps_hsphy_init(struct phy *phy)
+ 	return ret;
+ }
+ 
++static int sky_dummy_marker;
++
+ static int qcom_snps_hsphy_exit(struct phy *phy)
+ {
+ 	struct qcom_snps_hsphy *hsphy = phy_get_drvdata(phy);

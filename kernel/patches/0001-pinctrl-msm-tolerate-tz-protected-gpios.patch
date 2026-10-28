@@ -1,0 +1,56 @@
+diff --git a/drivers/pinctrl/qcom/pinctrl-msm.c b/drivers/pinctrl/qcom/pinctrl-msm.c
+index 27f06bbc1..b3a062172 100644
+--- a/drivers/pinctrl/qcom/pinctrl-msm.c
++++ b/drivers/pinctrl/qcom/pinctrl-msm.c
+@@ -23,6 +23,7 @@
+ 
+ #include <linux/pinctrl/machine.h>
+ #include <linux/pinctrl/pinconf-generic.h>
++#include <linux/uaccess.h>
+ #include <linux/pinctrl/pinconf.h>
+ #include <linux/pinctrl/pinmux.h>
+ 
+@@ -82,16 +83,26 @@ struct msm_pinctrl {
+ 	u32 phys_base[MAX_NR_TILES];
+ };
+ 
++/*
++ * sky bring-up: on SM4450 a few TLMM register pages are protected by
++ * TZ/XPU; a plain read or write to them raises a synchronous external
++ * abort and takes the boot down. Use fault-tolerant accesses and just
++ * ignore the protected pins.
++ */
+ #define MSM_ACCESSOR(name) \
+ static u32 msm_readl_##name(struct msm_pinctrl *pctrl, \
+ 			    const struct msm_pingroup *g) \
+ { \
+-	return readl(pctrl->regs[g->tile] + g->name##_reg); \
++	u32 __v = 0; \
++	WARN_ON_ONCE(copy_from_kernel_nofault(&__v, \
++		(void __force *)(pctrl->regs[g->tile] + g->name##_reg), sizeof(__v))); \
++	return __v; \
+ } \
+ static void msm_writel_##name(u32 val, struct msm_pinctrl *pctrl, \
+ 			      const struct msm_pingroup *g) \
+ { \
+-	writel(val, pctrl->regs[g->tile] + g->name##_reg); \
++	WARN_ON_ONCE(copy_to_kernel_nofault( \
++		(void __force *)(pctrl->regs[g->tile] + g->name##_reg), &val, sizeof(val))); \
+ }
+ 
+ MSM_ACCESSOR(ctl)
+@@ -1501,6 +1512,14 @@ static int msm_gpio_init(struct msm_pinctrl *pctrl)
+ 	girq->parents[0] = pctrl->irq;
+ 	girq->init_valid_mask = msm_gpio_irq_init_valid_mask;
+ 
++	/*
++	 * sky bring-up: gpiochip_add_data() probes the direction of every valid
++	 * pin; on SM4450 some pins are TZ/XPU protected and reading them raises
++	 * an unrecoverable synchronous external abort. Do not expose
++	 * get_direction for now (gpiolib then skips the probe entirely).
++	 */
++	pctrl->chip.get_direction = NULL;
++
+ 	ret = devm_gpiochip_add_data(pctrl->dev, &pctrl->chip, pctrl);
+ 	if (ret) {
+ 		dev_err(pctrl->dev, "Failed register gpiochip\n");

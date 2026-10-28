@@ -1,0 +1,159 @@
+#!/bin/busybox sh
+# sky M3c: USB composite gadget (ACM console + NCM network), DHCP server,
+# sshd and a root shell on /dev/ttyGS0.
+BB=/bin/busybox
+BEX=/bin/busybox-extras
+
+$BB mount -t proc proc /proc
+$BB mount -t sysfs sysfs /sys
+$BB mount -t devtmpfs devtmpfs /dev 2>/dev/null
+$BB mkdir -p /dev/pts
+$BB mount -t devpts devpts /dev/pts 2>/dev/null
+$BB mount -t configfs configfs /sys/kernel/config 2>/dev/null
+$BB mount -t tmpfs tmpfs /tmp
+$BB --install -s /bin 2>/dev/null
+export PATH=/bin:/sbin
+
+# reboot/poweroff/halt: busybox would signal PID 1 (this script) and hang, so
+# replace the applet links with wrappers that sync, unmount UFS and use the
+# syscall directly.
+$BB rm -f /bin/reboot /bin/poweroff /bin/halt /bin/shutdown
+cat > /bin/reboot <<'EOS'
+#!/bin/busybox sh
+sync; sync
+umount /mnt 2>/dev/null
+exec /bin/busybox reboot -f
+EOS
+cat > /bin/poweroff <<'EOS'
+#!/bin/busybox sh
+sync; sync
+umount /mnt 2>/dev/null
+exec /bin/busybox poweroff -f
+EOS
+cat > /bin/halt <<'EOS'
+#!/bin/busybox sh
+sync; sync
+umount /mnt 2>/dev/null
+exec /bin/busybox halt -f
+EOS
+cat > /bin/shutdown <<'EOS'
+#!/bin/busybox sh
+sync; sync
+umount /mnt 2>/dev/null
+case "$*" in
+	*-r*) exec /bin/busybox reboot -f ;;
+	*)    exec /bin/busybox poweroff -f ;;
+esac
+EOS
+chmod +x /bin/reboot /bin/poweroff /bin/halt /bin/shutdown
+
+# a plain SIGTERM (``reboot`` from another shell, container stop, ...) powers off
+trap 'sync; umount /mnt 2>/dev/null; /bin/busybox poweroff -f' TERM INT
+$BB mkdir -p /var/empty /run/sshd /etc/ssh
+$BB echo "sky-m3c: userland up" > /dev/kmsg
+
+dump_usb() {
+	$BB dmesg | $BB grep -iE "usb|dwc3|udc|phy|gadget|ncm" | $BB tail -n 120 > /tmp/usb.txt 2>/dev/null
+	[ -s /tmp/usb.txt ] || return 0
+	[ -c /dev/pmsg0 ] && $BB dd if=/tmp/usb.txt of=/dev/pmsg0 bs=4096 2>/dev/null
+	return 0
+}
+
+# ---- USB gadget: CDC ACM (console) + CDC NCM (ethernet) ----
+G=/sys/kernel/config/usb_gadget/sky
+$BB mkdir -p $G 2>/dev/null
+$BB echo 0x1d6b > $G/idVendor
+$BB echo 0x0104 > $G/idProduct
+$BB echo 0x0200 > $G/bcdUSB
+$BB echo 0x0100 > $G/bcdDevice
+$BB mkdir -p $G/strings/0x409
+$BB echo sky00000001 > $G/strings/0x409/serialnumber
+$BB echo Xiaomi > $G/strings/0x409/manufacturer
+$BB echo "Redmi 12 5G mainline" > $G/strings/0x409/product
+$BB mkdir -p $G/configs/c.1/strings/0x409
+$BB echo "acm+ncm" > $G/configs/c.1/strings/0x409/configuration
+$BB echo 250 > $G/configs/c.1/MaxPower
+$BB mkdir -p $G/functions/acm.usb0 $G/functions/ncm.usb0
+$BB echo 02:11:22:33:44:55 > $G/functions/ncm.usb0/host_addr 2>/dev/null
+$BB echo 02:11:22:33:44:66 > $G/functions/ncm.usb0/dev_addr 2>/dev/null
+$BB ln -s $G/functions/acm.usb0 $G/configs/c.1/acm.usb0 2>/dev/null
+$BB ln -s $G/functions/ncm.usb0 $G/configs/c.1/ncm.usb0 2>/dev/null
+
+UDC=$($BB ls /sys/class/udc 2>/dev/null | $BB head -n 1)
+if [ -n "$UDC" ]; then
+	$BB echo "$UDC" > $G/UDC
+	$BB echo "sky-m3c: gadget bound to $UDC" > /dev/kmsg
+else
+	$BB echo "sky-m3c: no UDC!" > /dev/kmsg
+fi
+$BB sleep 1
+
+# ---- network over NCM ----
+$BB ip link set usb0 up 2>/dev/null
+$BB ip addr add 192.168.7.1/24 dev usb0 2>/dev/null
+$BB ip link set usb0 up 2>/dev/null
+cat > /tmp/udhcpd.conf <<'CONF'
+start 192.168.7.10
+end 192.168.7.50
+interface usb0
+lease_file /tmp/udhcpd.leases
+opt router 192.168.7.1
+opt dns 192.168.7.1
+CONF
+$BEX udhcpd /tmp/udhcpd.conf
+$BB echo "sky-m3c: usb0=192.168.7.1/24, dhcp server up" > /dev/kmsg
+
+# ---- ssh ----
+[ -f /etc/ssh/ssh_host_ed25519_key ] || /bin/ssh-keygen -A >/dev/null 2>&1
+$BB mkdir -p /run/sshd
+$BB mkdir -p /usr/lib/ssh
+/sbin/sshd -f /etc/ssh/sshd_config -E /tmp/sshd.log
+$BB sleep 1
+if $BB netstat -ltn 2>/dev/null | $BB grep -q ':22 '; then
+	$BB echo "sky-m3c: sshd listening on :22" > /dev/kmsg
+else
+	$BB echo "sky-m3c: sshd FAILED" > /dev/kmsg
+	$BB cat /tmp/sshd.log > /dev/tty0 2>/dev/null
+fi
+
+# ---- UFS: show what the controller found (read-only, mount nothing) ----
+$BB sleep 2
+{
+	echo "=== ufs probe ==="
+	$BB dmesg | $BB grep -iE "ufs|scsi|sd [0-9]|ufshcd" | $BB tail -n 40
+	echo "=== partitions ==="
+	$BB cat /proc/partitions
+	echo "=== block devices ==="
+	$BB ls -l /dev/sd* /dev/mmcblk* 2>/dev/null
+} > /dev/tty0 2>/dev/null
+{
+	echo "sky-ufs: partitions:"
+	$BB cat /proc/partitions
+} > /dev/kmsg 2>/dev/null
+
+# ---- UFS: mount userdata (ext4) read/write as persistent storage ----
+$BB mkdir -p /mnt
+n=0
+while [ ! -b /dev/sda20 ] && [ $n -lt 20 ]; do $BB sleep 1; n=$((n+1)); done
+if [ -b /dev/sda20 ]; then
+	$BB mount -t ext4 /dev/sda20 /mnt 2>/dev/null && {
+		$BB mkdir -p /mnt/skyroot /mnt/log
+		$BB dmesg > /mnt/log/dmesg-last.txt 2>/dev/null
+		$BB echo "sky: ufs mounted, log saved to /mnt/log/dmesg-last.txt" > /dev/kmsg
+	} || $BB echo "sky: mount /dev/sda20 failed" > /dev/kmsg
+else
+	$BB echo "sky: no /dev/sda20" > /dev/kmsg
+fi
+
+dump_usb
+
+# keep the interface up if the host re-plugs
+( while :; do $BB sleep 15; $BB ip link set usb0 up 2>/dev/null; done ) &
+
+# root shell on the ACM port, restart on hangup
+while :; do
+	if [ -c /dev/ttyGS0 ]; then
+		$BB sh -c 'exec $0 sh </dev/ttyGS0 >/dev/ttyGS0 2>&1' /bin/busybox
+	fi
+	$BB sleep 1
+done
