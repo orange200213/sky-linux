@@ -18,3 +18,6 @@ sky-initramfs.cpio.gz
 # editor / OS noise
 *~
 .DS_Store
+
+# release assets (built locally, uploaded by hand)
+dist/
