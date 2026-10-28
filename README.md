@@ -111,6 +111,10 @@ them are documented in `docs/debugging.md`:
 
 ---
 
+## Releases
+
+Released boot images and what to do with them: `docs/install-and-usage.md`.
+
 ## License
 
 - `shim/`, `tools/`, `initramfs/`, `docs/`: GPL-2.0-or-later (see `LICENSE`).
