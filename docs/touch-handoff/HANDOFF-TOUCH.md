@@ -253,3 +253,129 @@ with raw deflate (`zlib.decompress(data, -15)`); see `logs/`.
 Related material: `docs/m7-touch.md` (public summary), `docs/handoff/HANDOFF.md`
 (display), `docs/m6-power.md` (power), `docs/partitions-sky.txt` (GPT names, useful if
 firmware for the touch controller ever turns out to live in a vendor partition).
+
+---
+
+# Update: attempt 2 — the SPI controller works, the SE does not execute commands
+
+Everything below was measured on the device, not inferred.
+
+## What now works
+
+The SPI controller probes and registers:
+
+```
+geni_spi a84000.spi: error -ENODEV: Failed to get tx DMA ch
+geni_spi a84000.spi: FIFO mode disabled, but couldn't get DMA, fall back to FIFO mode
+/sys/class/spi_master/spi0
+```
+
+Verified configuration (see section "verified DTS recipe" below): wrapper 1 AHB clocks,
+SE clock, QUP core clock, interrupt 354, pin mux.
+
+## What still fails
+
+```
+sky-spi-xfer: speed=9600000 cur=9600000 se_clk=19200000 status=00000000 m_cmd0=18000000
+novatek-nvt-ts-spi spi0.0: SPI transfer timed out          (-110, 200 ms)
+sky-spi-irq:  m_irq=00000021 status=00000000 m_cmd0=18000000 s_irq=00000000
+```
+
+Decoded:
+
+| Field | Value | Meaning |
+|---|---|---|
+| `se_clk` | 19200000 | SE clock is running |
+| `status` (`SE_GENI_STATUS`) | 0 | the SE never enters the "command executing" state |
+| `m_irq` | `0x21` = `M_CMD_DONE_EN \| M_CMD_ABORT_EN` | produced by our own cancel after the timeout |
+| error bits (OVERRUN / ILLEGAL_CMD / FAILURE) | not set | the command is neither rejected nor executed |
+
+So the SE accepts the command into `SE_GENI_M_CMD0` and then does nothing.
+
+## Verified DTS recipe (all of it measured)
+
+```dts
+&qupv3_id_0 {                       /* = geniqup@ac0000, the vendor's "wrapper 1" */
+	status = "okay";
+	clocks = <&gcc GCC_QUPV3_WRAP_1_M_AHB_CLK>,
+	         <&gcc GCC_QUPV3_WRAP_1_S_AHB_CLK>;   /* the dtsi wrongly uses WRAP_0 */
+	clock-names = "m-ahb", "s-ahb";
+
+	spi_touch: spi@a84000 {
+		compatible = "qcom,geni-spi";
+		reg = <0 0x00a84000 0 0x4000>;
+		clocks = <&gcc GCC_QUPV3_WRAP1_S1_CLK>,
+		         <&gcc GCC_QUPV3_WRAP1_CORE_CLK>;
+		clock-names = "se", "core";
+		interrupts = <GIC_SPI 354 IRQ_TYPE_LEVEL_HIGH>;
+		interconnects = <&clk_virt MASTER_QUP_CORE_1 QCOM_ICC_TAG_ALWAYS
+				 &clk_virt SLAVE_QUP_CORE_1 QCOM_ICC_TAG_ALWAYS>,
+				<&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ALWAYS
+				 &config_noc SLAVE_QUP_1 QCOM_ICC_TAG_ALWAYS>;
+		interconnect-names = "qup-core", "qup-config";
+		pinctrl-names = "default";     /* a "sleep" state muxes the pins to GPIO */
+		pinctrl-0 = <&qup_spi1_default>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		touchscreen@0 { compatible = "novatek,nvt-ts-spi"; reg = <0>; ... };
+	};
+};
+```
+
+Pins: gpio26 (clk), gpio27 (cs), gpio50 (miso), gpio51 (mosi), all with function
+`qup1_se1` — confirmed applied:
+
+```
+pin 26 (GPIO_26): device a84000.spi function qup1_se1 group gpio26
+pin 27 (GPIO_27): device a84000.spi function qup1_se1 group gpio27
+pin 50 (GPIO_50): device a84000.spi function qup1_se1 group gpio50
+pin 51 (GPIO_51): device a84000.spi function qup1_se1 group gpio51
+```
+
+Clock summary after the fix: `gcc_qupv3_wrap_1_{m,s}_ahb_clk` are consumed by
+`ac0000.geniqup`, `gcc_qupv3_wrap1_core_clk` by `a84000.spi core`,
+`gcc_qupv3_wrap1_s1_clk` by `a84000.spi se`.
+
+## Kernel patches that are needed regardless (keep them)
+
+```c
+/* drivers/soc/qcom/qcom-geni-se.c */
+	if (!wrapper)
+		return -EPROBE_DEFER;            /* was a NULL deref at 0x30 */
+
+	if (se->core_clk) {                      /* "core" is optional in DT */
+		ret = clk_prepare_enable(se->core_clk);
+		...
+	}
+```
+
+## Ranked hypotheses for "SE accepts command, never executes"
+
+1. **QUP firmware (`qupv3fw.elf`) for wrapper 1.** The stock fastboot images contain
+   `qupv3fw.elf`; Android loads it into the QUP core. Wrapper 0 clearly runs (i2c1
+   drives the KTD3136 backlight), so the *core* firmware is up, but wrapper 1 has never
+   been exercised by anything in our tree. Try: boot the stock Android boot image once
+   (or stock recovery) with touch working, then immediately kexec/reboot into our kernel
+   and retry — if the SE then works, the bitstream is initialised by the stock loader.
+2. **The SE is left in I2C protocol by the bootloader.** The vendor DT describes both
+   `i2c@a84000` and `spi@a84000` on the same SE. Test: add an `i2c@a84000` node, scan the
+   bus (expect a NAK but check whether transfers *complete*). If I2C on this SE also
+   hangs, the SE itself is unconfigured and hypothesis 1 wins; if I2C completes, the
+   protocol switch is the problem.
+3. **`qcom,disable-dma` / GPI differences.** The driver falls back to FIFO mode; adding
+   the property explicitly changes the code path (`geni_se_select_mode` ordering).
+4. **Cross-check with `uart7`** (same wrapper, SE2, `GCC_QUPV3_WRAP1_S2_CLK`, IRQ 355):
+   enable it with its own pinctrl and send a byte. If UART7 also hangs, the wrapper is
+   not usable and hypothesis 1 is almost certainly right; if UART7 works, the problem is
+   SPI-specific on SE1.
+
+## Practical notes for the next session
+
+* The debug probes live in `drivers/spi/spi-geni-qcom.c` (`sky-spi-xfer`, `sky-spi-irq`)
+  and print `SE_GENI_STATUS`, `M_CMD0`, `S_IRQ` — keep them until touch works.
+* Never put the SE node outside a wrapper and never use the WRAP_0 clocks for
+  `ac0000`: both cause immediate hangs (bus hang, no oops, no pstore record).
+* A hang leaves **no pstore record**: the screen log freezes instead. Photograph the
+  screen, or boot a known-good image from fastboot and read `/sys/fs/pstore` before
+  TWRP overwrites it.
