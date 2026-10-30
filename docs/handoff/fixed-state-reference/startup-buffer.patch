@@ -1,0 +1,23 @@
+--- build/twrp-dsc-buffer/dpu_hw_dsc_1_2.c.before	2026-10-30 13:28:06.822673352 +0900
++++ kernel/min-tree/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c	2026-10-30 13:28:06.842155501 +0900
+@@ -4,6 +4,7 @@
+  * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved
+  */
+ 
++#include <linux/of.h>
+ #include <drm/drm_managed.h>
+ 
+ #include <drm/display/drm_dsc_helper.h>
+@@ -65,6 +66,12 @@
+ 	if (hw_dsc->caps->features & BIT(DPU_DSC_NATIVE_42x_EN))
+ 		max_addr /= 2;
+ 
++	if (of_machine_is_compatible("qcom,sm4450")) {
++		max_addr = 600 / num_softslice;
++		pr_info("sky-dsc-buffer-test: max_addr=%d slices=%d\n",
++			max_addr - 1, num_softslice);
++	}
++
+ 	return max_addr - 1;
+ };
+ 

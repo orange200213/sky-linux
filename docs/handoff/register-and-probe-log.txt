@@ -1,0 +1,46 @@
+Live probe / register dumps captured over SSH from the device
+(kernel 7.3.0-g4e6c68989319-dirty, sky-m6n-dsi-regs.img + current panel module).
+These are the last known values; the device was offline when this file was written,
+so re-capture with:
+    ssh root@192.168.7.1 "dmesg | grep sky-"
+
+--- DSC parameters as programmed by mainline (dsi_populate_dsc_params) ---
+sky-dscparams: v1.1 bpp=128 bpc=8 fl_bpg=12 ixd=170 dec=526 init_off=6144 final_off=7072 scale_inc=113 scale_dec=7 nfl=1294 chunk=540
+    (matches the vendor value table in vendor-dsc-analysis.md field for field)
+
+--- DSI packing parameters (dsi_update_dsc_timing) ---
+sky-tsetup:  flags=0x2a03 dsc=set widebus=1
+sky-dsi-dsc: slice_per_intf=2 chunk=540 total_bytes=1080 bytes_per_pkt=540 eol=0 pkt_per_line=2 slice_per_pkt=1
+
+--- DSI controller registers read back right after dsi_ctrl_enable() ---
+sky-dsiregs: CTRL=000001f1 LANE_CTRL=10000000 TOTAL=09e501ea ACT_H=01b00048 ACT_V=09b00014 \
+             VID_COMP=021c0b41 CMD_COMP=39003900 CMD_COMP2=00000000
+
+    VID_COMP = 0x021c_0b41  -> datatype 0x0b, PKT_PER_LINE field 0x40 (=> 2 packets/line),
+                               EOL_BYTE_NUM 0, EN 1, WC = 0x021c = 540 bytes
+    TOTAL    = 0x09e5_01ea  -> h_total 490, v_total 2533
+    ACT_H    = 0x01b0_0048  -> 72 .. 432   (compressed 180-pixel active window * widebus)
+    ACT_V    = 0x09b0_0014  -> 20 .. 2480  (2460 lines)
+    LANE_CTRL bit28 set (one-lane reset released; lane enables are set elsewhere)
+
+--- DPU INTF register (dpu_hw_intf_setup_timing_engine) ---
+sky-intf: cfg2 wrote 00001011 read 00001011 (widebus=1 compression=1 width=360 dce_bytes=1080)
+    INTF_CONFIG2 (0x060) = DATABUS_WIDEN(bit0) | DATA_HCTL_EN(bit4) | DCE_DATA_COMPRESS(bit12)
+    matches the vendor bits decoded from msm_drm.ko (same register, same bit layout)
+
+--- DPU DSC block (dpu_hw_dsc_config_1_2) ---
+sky-dsc12: slice=540x20 count=2 chunk=540 bpp=128 bpc=8 pic=1080x2460 mode=0x4 initial_lines=2 active_slice/enc=2
+    mode 0x4 = DSC_MODE_VIDEO only (no SPLIT_PANEL, no MULTIPLEX)
+
+--- Panel driver probe / enable ---
+sky-m19: probe enter / supplies ok / reset gpio ok / dsi configured / backlight ok
+sky-m19: panel add ret=0 / attaching to dsi / attach ret=0
+sky-panel: PPS sent, err=0
+sky-panel: dcs read id=3 [c0 11 00] pwr=1 [9c]
+    -> the DDIC answers DCS reads: command channel works both ways,
+       power mode 0x9c = booster on | sleep out | display on
+
+--- Backlight (KTD3136) ---
+ktd3136 1-0036: KTD3136 mode=0xc9 pwm=0x9b
+ktd3136 1-0036: probed id=0x18 brightness=1024
+    /sys/class/backlight/ktd3136-backlight/{brightness,max_brightness} = 1024/2047

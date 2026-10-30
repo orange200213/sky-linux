@@ -22,7 +22,7 @@ Everything here was developed and verified on real hardware.
 | **M2** USB gadget (CDC ACM) | ✅ works | dwc3 + SNPS femto HS PHY, `qcom,select-utmi-as-pipe-clk` was the missing bit |
 | **M3** USB networking + SSH | ✅ works | NCM + built-in DHCP, OpenSSH 9.x (needs `sshd-auth`/`sshd-session`) |
 | **M4** UFS storage | ✅ works | `userdata` (ext4, 108 GiB) mounted read/write, persistent logs |
-| **M5** display (DPU/DSI/panel) | ⬜ not started | needs `m19` panel driver + KTD3136 backlight |
+| **M5** display (DPU/DSI/panel) | ✅ works | DPU 8.6 + DSI 2.6 + `m19` panel at 1080x2460@90 with DSC, KTD3136 backlight, fbcon on `msmdrmfb` — [details](docs/m5-display.md) |
 | **M5** touch / power / charging | ⬜ not started | Novatek SPI touch, PMIC fuel gauge |
 | **M5** Wi-Fi / BT (WCN6750) | ⬜ not started | ath11k + hci_qca |
 
@@ -46,7 +46,9 @@ docs/          milestone write-ups, hardware notes, how debugging was done
 shim/          the freestanding ARM64 shim that is flashed as boot_a
 kernel/        our kernel patches, debug-only patches, and the build config
  dts/          sm4450-xiaomi-sky.dts + the generator that produced it
+docs/         milestone write-ups; docs/handoff/ has the full display bring-up record
 initramfs/     the /init script and the initramfs build helper
+kernel/       config, patch series, and the out-of-tree panel + backlight drivers
 tools/         payload/boot-image packers and the DTS build helper
 ```
 

@@ -1,0 +1,40 @@
+drm/msm/dpu: use the real DSC output buffer size on SM4450
+
+The DSC block on SM4450 has a 600-byte output buffer per encoder, but
+_dsc_calc_output_buf_max_addr() reports 2400 / num_softslice, i.e. four times
+the hardware capacity. The rate buffer therefore over-reports how much
+compressed data it can hold, the encoder keeps producing data that the block
+cannot buffer, and the emitted stream is corrupt: the panel decodes structured
+noise whose layout follows the DSC slice geometry (the artifact moves when
+slice_width / slice_count / slice_per_pkt change, and nothing is reported on
+the DSI link because the corruption happens before the PHY).
+
+With the correct size the Xiaomi "m19" panel on the Redmi 12 5G (SM4450)
+produces a correct image.
+
+The value should eventually come from the DPU catalog instead of a machine
+compatibility check; this keeps the bring-up patch small.
+
+Signed-off-by: sky-linux bring-up <orange200213@users.noreply.github.com>
+---
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c
+@@ -1,3 +1,4 @@
++#include <linux/of.h>
+ #include <drm/drm_managed.h>
+ 
+ #include <drm/display/drm_dsc_helper.h>
+@@ -65,6 +66,12 @@ static int _dsc_calc_output_buf_max_addr(struct dpu_hw_dsc *hw_dsc, int num_softs
+ 	if (hw_dsc->caps->features & BIT(DPU_DSC_NATIVE_42x_EN))
+ 		max_addr /= 2;
+ 
++	/* SM4450 exposes a 600-byte DSC rate buffer, not 2400 */
++	if (of_machine_is_compatible("qcom,sm4450")) {
++		max_addr = 600 / num_softslice;
++		pr_info("sky-dsc-buffer: max_addr=%d slices=%d\n",
++			max_addr - 1, num_softslice);
++	}
++
+ 	return max_addr - 1;
+ };
