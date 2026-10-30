@@ -165,3 +165,44 @@ and kills the box (same class of fault as the earlier `msm_gpio_get_direction` S
 3. Coordinates match the panel orientation (1080x2460 portrait); fix with
    `touchscreen-swapped-x-y` / `touchscreen-inverted-x/y` in the DT if needed.
 4. Commit the final DT + driver patches, update `docs/m7-touch.md` and the README row.
+
+---
+
+## 10. Reference implementations worth knowing
+
+* **MediaTek mt6895 / tb375fc** uses the same controller:
+  `https://github.com/u0n0u/tb375fc-linux` → `arch/arm64/boot/dts/mediatek/mt6895.dtsi`
+  (node `spi@11012000`, child `novatek@0`). Useful facts from it:
+  * `spi-max-frequency = <9600000>` (confirms the 9.6 MHz chip clock);
+  * downstream uses `novatek,irq-gpio` + three pinctrl states
+    (`pmx_ts_active`, `pmx_ts_suspend`, `pmx_ts_spimode`) instead of the generic
+    `interrupts` property; our ported driver uses GPIO descriptors + `interrupts`, so
+    no DT change is needed;
+  * it selects firmware per panel variant with `novatek,cfg_0/cfg_1`
+    (`novatek,fw-name`, `novatek,mp-name`, `novatek,tp-vendor`, `novatek,display-maker`),
+    i.e. one image per panel supplier. Our vendor partition only ships the generic
+    `novatek_ts_fw.bin`, which is what we use;
+  * the firmware file names there are `novatek_nt36672e_l16_fw01/02.bin`, and our vendor
+    partition carries `qdcm_calib_data_nt36672e_...json` — so **the DDIC is NT36672E**
+    (the vendor module is named `nvt_36672c.ko`, but that is the driver, not the IC).
+    The imported mainline driver maps NT36672C to the NT36675 memory map; if firmware
+    download ever succeeds but the chip misbehaves, the memory map is the next thing to
+    look at.
+  No value for the current blocker: the MTK SPI controller is a different block, so it
+  says nothing about the QUPv3 SE/DMA write failure.
+
+## 11. Attempt log (newest first)
+
+| Image | Change | Result |
+|---|---|---|
+| `sky-t29-mask-all.img` | TX chid 0, `dma-channel-mask = <0xfff>`, 1 MHz | built, not yet flashed |
+| `sky-t28-stable-nofw.img` | `BOOT_UPDATE_FIRMWARE 0` (no write attempts, no retry loop) | built, not yet flashed |
+| `sky-t27-dma-tx2-2m4.img` | TX moved to chid 2, 2.4 MHz | **regression**: SE stops executing at all (chip id read returns zeros), endless timeouts, console flood |
+| `sky-t26-dma-mask-2m4.img` | mask changed, 2.4 MHz | untested |
+| `sky-t25-dma-2m4.img` | DMA restored, 2.4 MHz | untested |
+| `sky-t21-touch-fw.img` | DMA, 1 MHz, firmware enabled | **best state**: chip detected, IRQ fires, reads OK, writes `-EIO` |
+| `sky-t24-fifo-fw.img` | FIFO (no dmas) | SE never executes, infinite retry loop, box appears hung |
+| `sky-t22-dma-noiommu.img` | GPI DMA without `iommus` | `gpi a00000.dma-controller: Unhandled interrupt status:0x40`, hang |
+
+Lesson from T27: the TX/RX channel ids must stay 0 and 1; moving TX to chid 2 breaks the
+whole DMA path, not just writes.
