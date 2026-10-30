@@ -271,3 +271,35 @@ The T20 kernel can be re-extracted any time from `shim/out/sky-t20-nt36xxx-real.
 against a fresh DTB. **Keep using this instead of rebuilding the kernel**: every kernel
 rebuild in this session produced an Image that never reached the root filesystem, while
 the T20 binary + new DTBs boot every time.
+
+---
+
+## 13. The sm7150-mainline driver is a *different* implementation (and worth porting)
+
+`https://github.com/sm7150-mainline/linux` (commit `fd78d17`) carries a Novatek driver
+that is **not** the vendor import we are using:
+
+| | ours (`drivers/input/touchscreen/nt36xxx-spi/`) | sm7150-mainline (`nt36xxx_{spi,core}.c` + `nt36xxx.h`) |
+|---|---|---|
+| origin | vendor driver imported from `nairoArchLinuxArmTools`, ported | rewrite on top of `goodix_ts_berlin`, ~41 KB total, 3 files |
+| transport | `CTP_SPI_READ`/`CTP_SPI_WRITE` macros on `spi_write_then_read()` | **regmap** with custom `.read`/`.write` callbacks (`spi_write()` + `spi_write_then_read()`) |
+| big transfers | one `spi_write()` of the whole page (4 KB) → **times out on our SE** | `max_raw_read/write = spi_max_transfer_size(spi) - 1`, so regmap splits; firmware download chunks at `NT36XXX_TRANSFER_LEN = 63 KB` |
+| SPI mode | taken from DT/`spi_setup()` defaults | explicitly `SPI_MODE_0`, `bits_per_word = 8`, `spi_setup()` |
+| compatible | `novatek,nvt-ts-spi` | `novatek,nt36xxx-spi` |
+| chip map | `nt36675` map (our port) | `nt36675_memory_maps` — same map |
+| firmware | implements `nvt_download_firmware_hw_crc` (our failing path) | same download logic, but through regmap chunks |
+| extra deps | none | `drm/drm_panel.h` (panel DDIC vendor detection) and two supplies (`vcc`, `iovcc`) — both need care on our board |
+
+Why this matters: their driver's write path never hands the controller one huge buffer and
+it caps transfers at what the controller advertises, which is exactly the class of problem
+we hit (4 KB write → `-110`). Their two design dependencies to plan for:
+
+1. `drm_panel` lookup for panel-variant selection — our panel driver (`panel-xiaomi-m19`)
+   would need to expose the DDIC vendor byte, or the lookup needs to be made optional.
+2. `vcc`/`iovcc` regulator supplies — our DT has none today.
+
+Sources were fetched into `kernel/min-tree/drivers/input/touchscreen/nt36xxx-ml/`
+(`nt36xxx.h`, `nt36xxx_core.c`, `nt36xxx_spi.c`) but are **not wired into Kconfig/Makefile
+yet**, so they do not affect the build. Next session: add a `CONFIG_TOUCHSCREEN_NT36XXX_ML`
+tristate entry, build it as a module, add `novatek,nvt-ts-spi` to its `of_match_table`, and
+load it over SSH exactly like section 12 describes.
