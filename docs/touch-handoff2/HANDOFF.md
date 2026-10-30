@@ -360,3 +360,53 @@ Image, so the flashed boot image is unaffected.
 2. Otherwise instrument the vendor driver + `spi-geni-qcom.c` TX path for a large transfer
    (`dmaengine_prep_slave_sg`, `SE_GENI_STATUS`, `M_CMD0` after the command).
 3. Only then revisit the "SE in GSI DMA mode + QUP firmware" theory.
+
+---
+
+## 16. The mainline driver now reads the chip correctly — and independently confirms the TX bug
+
+Fix applied to `nt36xxx-ml/nt36xxx_spi.c` (read path) and `nt36xxx_core.c` (id compare):
+
+1. **read sequence**: the vendor `CTP_SPI_READ()` sends the address byte and reads back
+   `len + 1` bytes in one full-duplex message, taking the payload from `rx[2]`. The
+   upstream driver sent the address with `spi_write_then_read()` and no dummy bytes, which
+   returned all zeros. Replacing it with one full-duplex message of
+   `val_size + 2` bytes (payload copied from `rx + 2`) fixed it:
+
+   ```
+   before: nt36xxx_chip_version_init buf[0]=0x00 ... buf[6]=0x00
+   after:  nt36xxx_chip_version_init buf[0]=0x0C, buf[1]=0x00, buf[2]=0x00,
+                                     buf[3]=0x72, buf[4]=0x66, buf[5]=0x03, buf[6]=0xFF
+   ```
+   which is exactly the payload the vendor driver sees (`04 0C 00 00 72 66 03`, its first
+   byte being the address it left in the buffer).
+
+2. **chip-id compare**: compare `buf[i]` instead of `buf[i+1]` (no leading dummy byte after
+   the fix) and skip the `{ }` sentinel entry (`mapid == 0`), which otherwise matches every
+   chip and forces "hw not found".
+
+Result: the chip is now identified and the driver proceeds to the firmware step:
+
+```
+nt36xxx-ml spi0.0: SPI transfer timed out
+nt36xxx-ml spi0.0: transfer err -110
+...  (repeated)
+nt36xxx-ml spi0.0: Firmware reset failed.
+```
+
+**This is the important conclusion of the session**: a completely independent driver — with
+a different transport (regmap), different write chunking and different register sequences —
+fails at exactly the same place, with the same `-110` on a **write**, while its **reads
+work**. The bug is therefore in our QUPv3 SE / GPI-DMA **transmit** path, not in either
+touch driver.
+
+Where to look next, concretely:
+
+1. `setup_gsi_xfer()`/`spi_geni_gsi_tx()` in `drivers/spi/spi-geni-qcom.c`: whether the TX
+   descriptor is issued and whether `SE_GENI_M_CMD0` ever gets the TX opcode; compare with
+   the RX path that works.
+2. The `dmas` arguments: `chid`/`seid`/`QCOM_GPI_SPI` triple. RX works with `chid 1`,
+   TX uses `chid 0`; the earlier experiment that moved TX to `chid 2` broke everything, so
+   the mapping itself is load-bearing.
+3. The vendor 5.10 QUP driver: it runs the SE in **GSI DMA mode** with `qcom,enable-gsi-dma`
+   and the QUP firmware — the one configuration we have never managed to boot.
