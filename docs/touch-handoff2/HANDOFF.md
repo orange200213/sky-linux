@@ -206,3 +206,68 @@ and kills the box (same class of fault as the earlier `msm_gpio_get_direction` S
 
 Lesson from T27: the TX/RX channel ids must stay 0 and 1; moving TX to chid 2 breaks the
 whole DMA path, not just writes.
+
+---
+
+## 12. Session 2 results (2026-10-30 evening)
+
+### Workflow breakthrough: iterate over SSH, no flashing
+
+The touch driver can be built as a module and swapped at runtime:
+
+```bash
+# kernel side (one-time): CONFIG_TOUCHSCREEN_NT36XXX_SPI=m, and rename the driver
+# so it can coexist with the built-in one: NVT_SPI_NAME "NVT-ts-spi-test"
+make -j10 modules            # -> drivers/input/touchscreen/nt36xxx-spi/nt36xxx_spi.ko
+
+# on the device (SSH, no reboot):
+echo spi0.0 > /sys/bus/spi/drivers/NVT-ts-spi/unbind     # release the built-in driver
+scp nt36xxx_spi.ko root@192.168.7.1:/lib/modules/$(uname -r)/extra/
+insmod /lib/modules/$(uname -r)/extra/nt36xxx_spi.ko
+dmesg | grep -E 'NVT-ts|CTP_SPI'
+rmmod nt36xxx_spi                                        # roll back in seconds
+```
+
+This turns a 3-minute flash cycle into a 20-second loop. Use it for all driver work.
+
+### What was measured
+
+| Test | Result |
+|---|---|
+| `spi_write_then_read()` 12 B (chip id) | **works** |
+| `spi_sync_transfer()` 2 B TX, 2 B RX, 4 B duplex | **works** |
+| `spi_write()` 8/16/64/…/4096 B | `-22` (see caveat below) |
+| `nvt_write_sram()` 4 KB page write (driver path) | `CTP_SPI_WRITE ret=-110` (ETIMEDOUT) → `nvt_write_sram 393: write to sram failed, ret = -5` → `Write_Firmware failed (-5)` |
+| `dma-channel-mask` 0x3e vs 0xfff | **identical** results → the mask is *not* the cause |
+
+**Caveat about `-22`:** `spi_map_buf()` in `drivers/spi/spi.c` returns `-EINVAL` when the
+buffer is neither vmalloc'd/kmap'd nor `virt_addr_valid()` (i.e. stack buffers). Those
+synthetic tests used stack/static buffers, so the `-22` is an artifact of the test, **not**
+the real bug. The real failure is the 4 KB page write timing out (`-110`).
+
+Remaining diagnosis: a multi-kilobyte TX in GPI DMA mode never completes, while RX and
+RX/TX of a few bytes do. Next things to instrument (all reachable from the module, except
+the first):
+
+1. Print `SE_GENI_STATUS`, `M_CMD0`, `S_IRQ` around a kmalloc'd 4 KB `spi_sync()`, and
+   compare against a kmalloc'd 64 B and 512 B write to find the size threshold.
+2. `spi_geni_gsi_tx()`/`setup_gsi_xfer()` in `drivers/spi/spi-geni-qcom.c`: does
+   `dmaengine_prep_slave_sg()` return valid descriptors for the 4 KB SG list?
+3. Compare with the vendor 5.10 driver: the vendor QUP likely runs the SE in **GSI DMA
+   mode** (firmware-loaded) rather than GENI mode with GPI descriptors, which is exactly
+   the mixture we have. If so, the fix is the `qcom,enable-gsi-dma` property plus the
+   QUP firmware path — both untested on top of a working GSI-capable SE.
+
+### Reliable images (kernel = the T20 binary, byte-identical)
+
+| Image | DTB |
+|---|---|
+| `shim/out/sky-t32-t20kernel.img` | `dma-channel-mask = <0x3e>`, 1 MHz — **baseline** |
+| `shim/out/sky-t33-mask-fff.img` | `dma-channel-mask = <0xfff>` — still fails, mask ruled out |
+
+The T20 kernel can be re-extracted any time from `shim/out/sky-t20-nt36xxx-real.img`
+(Android boot header at 0, `SWEETLNX` payload at 0x14000, arm64 `Image` at
+`image_off`, 73 333 248 bytes) and repacked with `mklinuxpayload.py` + `build-sky.sh`
+against a fresh DTB. **Keep using this instead of rebuilding the kernel**: every kernel
+rebuild in this session produced an Image that never reached the root filesystem, while
+the T20 binary + new DTBs boot every time.
