@@ -23,8 +23,9 @@ Everything here was developed and verified on real hardware.
 | **M3** USB networking + SSH | ✅ works | NCM + built-in DHCP, OpenSSH 9.x (needs `sshd-auth`/`sshd-session`) |
 | **M4** UFS storage | ✅ works | `userdata` (ext4, 108 GiB) mounted read/write, persistent logs |
 | **M5** display (DPU/DSI/panel) | ✅ works | DPU 8.6 + DSI 2.6 + `m19` panel at 1080x2460@90 with DSC, KTD3136 backlight, fbcon on `msmdrmfb` — [details](docs/m5-display.md) |
-| **M5** touch / power / charging | ⬜ not started | Novatek SPI touch, PMIC fuel gauge |
-| **M5** Wi-Fi / BT (WCN6750) | ⬜ not started | ath11k + hci_qca |
+| **M6** power / charging | ✅ works | ADSP firmware + QRTR + pd-mapper + pmic-glink, `battery`/`qcom-battmgr-*` power supplies — [details](docs/m6-power.md) |
+| **M7** touch (Novatek SPI) | 🚧 in progress | needs the QUPv3 wrapper node; enabling the SE standalone panics in `geni_se_clks_on()` — [details](docs/m7-touch.md) |
+| **M8** Wi-Fi / BT (WCN6750) | ⬜ not started | ath11k + hci_qca |
 
 Current boot chain:
 

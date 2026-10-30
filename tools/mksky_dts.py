@@ -170,7 +170,7 @@ BOARD_TAIL = """
 \t\tpinctrl-names = "default";
 \t\t#address-cells = <1>;
 \t\t#size-cells = <0>;
-\t\tstatus = "disabled"; /* enable once a driver exists */
+\t\tstatus = "disabled"; /* needs a qupv3 wrapper node: panic in geni_se_clks_on() otherwise */
 
 \t\ttouchscreen@0 {
 \t\t\tcompatible = "novatek,nvt-ts-spi";
@@ -277,6 +277,7 @@ def main():
     drop_labels = {"fan", "fan_pwm", "fan_pwr", "mcu_vdd", "hall_vdd", "rgb_vdd",
                    "singleadc_joypad", "speaker_amp_l", "speaker_amp_r", "sound",
                    "backlight", "leds", "wcn3950-pmu"}
+    drop_labels |= {"joypad_mcu"}
     ranges = []
     for lbl, name, s0, e0, ind in B.blocks(text):
         if lbl in drop_labels or name in drop_labels:
@@ -284,6 +285,22 @@ def main():
     for s0, e0, what in sorted(ranges, reverse=True):
         text = text[:s0] + text[e0:]
         print("dropped:", what)
+
+
+    # the qup_spi3 node only existed for the anbernic joypad
+    for lbl, name, s0, e0, ind in B.blocks(text):
+        if name in ("spi@a86000", "spi@a88000", "spi@a8c000") and "qup_spi3" in text[s0:e0]:
+            print("dropped:", name, "(joypad spi bus)")
+            text = text[:s0] + text[e0:]
+            break
+
+    # the geni-spi node on SE3 also pulls the SPI3 pin state (gpio18-21); it is
+    # only useful for the handheld gamepad MCU, so keep it out of the way
+    m = re.search(r"\tspi3: spi@98c000 \{.*?\n\t\};", text, flags=re.S)
+    if m:
+        blk = re.sub(r"\n\t\tstatus = \"[^\"]*\";", "", m.group(0))
+        blk = blk.replace("\tspi3: spi@98c000 {", "\tspi3: spi@98c000 {\n\t\tstatus = \"disabled\";", 1)
+        text = text[:m.start()] + blk + text[m.end():]
 
     # 4c. WCN3950 -> WCN6750 (sky's WiFi/BT combo), both disabled until the
     #     WPSS/ath11k work is done
@@ -362,8 +379,92 @@ def main():
         "\t\tphy-names = \"usb2-phy\";\n")
     text = text.replace("\t\tiommus = <&apps_smmu 0x540 0x0>;\n", "")
 
+    # 4h. display bring-up: the panel node's pinctrl state touches a TLMM page
+    # that is XPU-protected on this device (synchronous external abort during
+    # pinctrl_bind_pins). The m19 driver will drive the reset line itself.
+    m = re.search(r"\t\t\tpanel@0 \{.*?\n\t\t\t\};", text, flags=re.S)
+    if m:
+        blk = m.group(0)
+        blk = re.sub(r"\n\t\t\t\tpinctrl-[a-z0-9]* = <[^>]*>;", "", blk)
+        text = text[:m.start()] + blk + text[m.end():]
+
+    # 4i. GPIO 18 is XPU/TZ protected on this device: any TLMM register access
+    # to it (pinctrl state application) raises a synchronous external abort and
+    # kills the boot. Declare it reserved so gpiolib and our driver skip it.
+    if 'gpio-reserved-ranges' not in text:
+        text += ('\n&tlmm {\n'
+                 '\t/* TZ/XPU protected on sky; never touch its registers */\n'
+                 '\tgpio-reserved-ranges = <18 1>;\n'
+                 '};\n')
+
+    # 4k. backlight: KTD3136 on i2c1 @0x36, HWEN on TLMM gpio6 (vendor DT)
+    if 'ktd3136' not in text:
+        text += ('\n&i2c1 {\n'
+                 '\tbacklight: backlight@36 {\n'
+                 '\t\tcompatible = "ktd,ktd3136";\n'
+                 '\t\treg = <0x36>;\n'
+                 '\t\tenable-gpios = <&tlmm 6 GPIO_ACTIVE_HIGH>;\n'
+                 '\t\tdefault-brightness = <1024>;\n'
+                 '\t};\n'
+                 '};\n')
+
+    # 4o. touch: mainline has only the Novatek SPI driver, whose NT36672A
+    # variant validates the chip id it reads over SPI. Enable the controller and
+    # bind with that compatible so the probe reports the real chip parameters.
+    text = re.sub(r'(spi_touch: spi@a84000 \{[^}]*?)status = "disabled";[^\n]*',
+                  r'\1status = "okay";', text, count=1, flags=re.S)
+    text = text.replace('compatible = "novatek,nvt-ts-spi";',
+                        'compatible = "novatek,nt36672a-ts";')
+
+    # 4n. QRTR over the ADSP glink edge. pd-mapper (protection domains),
+    # pmic-glink (battery/charger) and audio services are all looked up over
+    # QRTR, and qrtr_smd binds to the rpmsg channel named "IPCRTR".
+    if 'qcom,glink-channels = "IPCRTR"' not in text:
+        adsp_edge = ('\t\t\tlabel = "lpass";\n'
+                     '\t\t\tqcom,remote-pid = <2>;\n')
+        if adsp_edge in text:
+            text = text.replace(adsp_edge, adsp_edge +
+                '\n\t\t\tipcrtr {\n'
+                '\t\t\t\tqcom,glink-channels = "IPCRTR";\n'
+                '\t\t\t};\n'
+                '\n\t\t\tpmic_rtr {\n'
+                '\t\t\t\tqcom,glink-channels = "PMIC_RTR_ADSP_APPS";\n'
+                '\t\t\t};\n', 1)
+
+    # 4m. pmic-glink must be a platform device with the upstream compatible;
+    # the base file has the machine compatible list copied into the node, which
+    # stops drivers/soc/qcom/pmic_glink.c from binding (no battery/charger).
+    text = text.replace(
+        '\tpmic_glink: pmic-glink {\n'
+        '\t\tcompatible = "xiaomi,sky", "xiaomi,river", "qcom,sm4450", "qcom,ravelin";',
+        '\tpmic_glink: pmic-glink {\n'
+        '\t\tcompatible = "qcom,pmic-glink";')
+
+    # 4l. firmware paths: our own machine directory, split-mdt ADSP image
+    text = text.replace("qcom/sm4450/RG55G1/adsp.mbn", "qcom/sm4450/xiaomi-sky/adsp.mdt")
+    text = text.replace("qcom/sm4450/RG55G1/wpss.mbn", "qcom/sm4450/xiaomi-sky/wpss.mbn")
+
     # 5. header + board tail
     text = HEADER + text + BOARD_TAIL + MEM_TAIL
+
+    # 4j. panel rails: the PM6450 GPIO controller is not usable yet (its SPMI
+    # child never probes), so drive them as always-on fixed regulators. ABL
+    # already powers the panel for its splash, so the voltages are there.
+    for name in ("panel-vddio", "panel-extvdd", "panel-avdd", "panel-ibb"):
+        m = re.search(r"\n\t(?:[A-Za-z0-9_]+: )?regulator-" + name +
+                      r" \{.*?\n\t\};", text, flags=re.S)
+        if not m:
+            continue
+        blk = m.group(0)
+        blk = re.sub(r"\n\t\tgpio = <[^>]*>;", "", blk)
+        blk = re.sub(r"\n\t\tenable-active-high;", "", blk)
+        blk = re.sub(r"\n\t\tregulator-m(ax|in)-microvolt = <[0-9]+>;", "", blk)
+        if "regulator-always-on" not in blk:
+            blk = blk.replace("regulator-boot-on;",
+                              "regulator-boot-on;\n\t\tregulator-always-on;")
+        text = text[:m.start()] + blk + text[m.end():]
+
+
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     open(OUT, "w").write(text)
     print("wrote", OUT, len(text.splitlines()), "lines")
