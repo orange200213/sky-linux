@@ -1,0 +1,62 @@
+<6>[    0.263834] 988000.serial: ttyHS1 MMIO:0x0000000000988000 (irq = 148, base_baud = 0) is a MSM
+<3>[    0.290100] sm4450-tlmm f100000.pinctrl: invalid group "gpio8" for function "qup1_se1"
+<3>[    0.290168] sm4450-tlmm f100000.pinctrl: invalid group "gpio9" for function "qup1_se1"
+<3>[    0.290207] sm4450-tlmm f100000.pinctrl: invalid group "gpio10" for function "qup1_se1"
+<3>[    0.290243] sm4450-tlmm f100000.pinctrl: invalid group "gpio11" for function "qup1_se1"
+<1>[    0.290436] Unable to handle kernel NULL pointer dereference at virtual address 0000000000000030
+<1>[    0.290477] Mem abort info:
+<1>[    0.290494]   ESR = 0x0000000096000004
+<1>[    0.290512]   EC = 0x25: DABT (current EL), IL = 32 bits
+<1>[    0.290535]   SET = 0, FnV = 0
+<1>[    0.290551]   EA = 0, S1PTW = 0
+<1>[    0.290568]   FSC = 0x04: level 0 translation fault
+<1>[    0.290589] Data abort info:
+<1>[    0.290604]   ISV = 0, ISS = 0x00000004, ISS2 = 0x00000000
+<1>[    0.290626]   CM = 0, WnR = 0, TnD = 0, TagAccess = 0
+<1>[    0.290648]   GCS = 0, Overlay = 0, DirtyBit = 0
+<1>[    0.290668] [0000000000000030] user address but active_mm is swapper
+<0>[    0.290693] Internal error: Oops: 0000000096000004 [#1]  SMP
+<4>[    0.290717] Modules linked in:
+<4>[    0.290741] CPU: 1 UID: 0 PID: 67 Comm: kworker/u32:2 Not tainted 7.3.0-g4e6c68989319-dirty #73 PREEMPT 
+<4>[    0.290776] Hardware name: Xiaomi Redmi 12 5G (sky) (DT)
+<4>[    0.290799] Workqueue: events_unbound deferred_probe_work_func
+<4>[    0.290834] pstate: 60400005 (nZCv daif +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+<4>[    0.290861] pc : geni_se_clks_on+0x24/0x140
+<4>[    0.290887] lr : geni_se_resources_activate+0x54/0x94
+<4>[    0.290911] sp : ffff800084b33990
+<4>[    0.290928] x29: ffff800084b33990 x28: 0000000000000000 x27: ffff000000d0ad40
+<4>[    0.290962] x26: 0000000000000001 x25: 0000000000000000 x24: 0000000000000001
+<4>[    0.290995] x23: 0000000000000002 x22: 0000000000000010 x21: 0000000000000000
+<4>[    0.291029] x20: ffff0000017eadc0 x19: ffff0000017eadc0 x18: 0000000000000006
+<4>[    0.291062] x17: 6e6f6974636e7566 x16: 20726f6620223131 x15: 0000000000000000
+<4>[    0.291095] x14: ffffffffffffffff x13: 0000000000000030 x12: 0000000000000000
+<4>[    0.291129] x11: ffff0000022d1240 x10: 00000000001250c8 x9 : 0000000000000005
+<4>[    0.291162] x8 : ffff000000f423c0 x7 : 0000000000000000 x6 : 00000000fffffff8
+<4>[    0.291196] x5 : 0000000000000043 x4 : ffff800080b447e0 x3 : 0000000000000001
+<4>[    0.291229] x2 : ffff800080bf19fc x1 : 0000000000000001 x0 : ffff0000017eadc0
+<4>[    0.291263] Call trace:
+<4>[    0.291280]  geni_se_clks_on+0x24/0x140 (P)
+<4>[    0.291307]  geni_se_resources_activate+0x54/0x94
+<4>[    0.291332]  spi_geni_runtime_resume+0x2c/0x68
+<4>[    0.291357]  pm_generic_runtime_resume+0x2c/0x44
+<4>[    0.291382]  __rpm_callback+0x48/0x1d8
+<4>[    0.291404]  rpm_callback+0x58/0x64
+<4>[    0.291425]  rpm_resume+0x484/0x6bc
+<4>[    0.291446]  __pm_runtime_resume+0x50/0x94
+<4>[    0.291468]  spi_geni_probe+0x260/0x77c
+<4>[    0.291491]  platform_probe+0x5c/0x9c
+<4>[    0.291514]  really_probe+0xbc/0x29c
+<4>[    0.291535]  __driver_probe_device+0x16c/0x19c
+<4>[    0.291558]  driver_probe_device+0x3c/0x114
+<4>[    0.291580]  __device_attach_driver+0xb8/0x118
+<4>[    0.291603]  bus_for_each_drv+0x88/0xe8
+<4>[    0.291626]  __device_attach+0xa0/0x190
+<4>[    0.291647]  device_initial_probe+0x50/0x54
+<4>[    0.291669]  bus_probe_device+0x38/0xa0
+<4>[    0.291690]  deferred_probe_work_func+0x88/0xc0
+<4>[    0.291714]  process_one_work+0x180/0x2dc
+<4>[    0.291742]  worker_thread+0x188/0x300
+<4>[    0.291764]  kthread+0x118/0x124
+<4>[    0.291785]  ret_from_fork+0x10/0x20
+<0>[    0.291811] Code: a9025bf5 f9001bf7 f9400815 910042b6 (b94032b7) 
+<4>[    0.291840] ---[ end trace 0000000000000000 ]---
