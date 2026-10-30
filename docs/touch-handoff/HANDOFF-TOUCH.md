@@ -379,3 +379,86 @@ Clock summary after the fix: `gcc_qupv3_wrap_1_{m,s}_ahb_clk` are consumed by
 * A hang leaves **no pstore record**: the screen log freezes instead. Photograph the
   screen, or boot a known-good image from fastboot and read `/sys/fs/pstore` before
   TWRP overwrites it.
+
+---
+
+# Update 3: QUP firmware attempts (both failed), current stable state
+
+Two more experiments, both reverted. The device now runs the image
+`shim/out/sky-t14-spi-ok-no-fw.img`
+(sha256 `69b98a19ccc33e1df82f3576127319cf1af485d852936464131d1c5c783f0074`):
+display, battery, USB, SSH and the SPI *controller* all work; touch still does not.
+
+## What the vendor DT actually says about this SE (new facts)
+
+```dts
+spi@a84000 {
+	compatible = "qcom,spi-geni";
+	clock-names = "se-clk", "m-ahb", "s-ahb";        /* three clocks on the SE */
+	clocks = <&gcc 0x4c>, <&gcc 0x56>, <&gcc 0x57>;
+	dmas = <&gpi_dma1 0 1 1 0x40 0>, <&gpi_dma1 1 1 1 0x40 0>;
+	qcom,wrapper-core = <&qupv3_id_0>;               /* downstream-only property */
+	interrupts = <0 0x162 4>;                        /* GIC SPI 354, level high  */
+	spi-max-frequency = <0x2faf080>;                  /* 50 MHz bus              */
+};
+```
+
+Note it is `qcom,spi-geni` (downstream name), and the AHBs are per-SE rather than
+per-wrapper. `qcom,wrapper-core` does not exist in mainline.
+
+## Experiment A: `firmware-name` on the wrapper (no driver support)
+
+lemans-evk (`sa8775p`) sets `firmware-name = "qcom/sa8775p/qupv3fw.elf"` on each
+`qupv3_id_N`. Mainline has the loader (`geni_load_se_firmware()`, exported,
+`qcom-geni-se.c:1587`) but **no caller anywhere in the tree**, so adding the property
+alone changed nothing (verified: no firmware-related messages at all).
+
+## Experiment B: call the loader from the SPI probe (panics)
+
+Adding `geni_load_se_firmware(&mas->se, GENI_SE_SPI)` to `spi_geni_probe()`:
+
+* before `spi_geni_init()` -> panic at 0.259 s (SE clocks/resources not up yet);
+* after `spi_geni_init()` with an explicit `pm_runtime_resume_and_get()` -> **still
+  panics at 0.258 s**, right after the "fall back to FIFO mode" message, with no
+  firmware log line. So the loader itself (PROG_RAM programming) is not safe on this
+  SoC as written, or it needs the wrapper in a different state.
+
+`qupv3fw.elf` (56 KB, from the stock fastboot images, md5 `be60dba370affd1dabb4779549f2534a`)
+is still in the initramfs at `lib/firmware/qcom/sm4450/xiaomi-sky/` and on the rootfs;
+harmless while nothing loads it.
+
+## Where the investigation stands
+
+| Question | Answer |
+|---|---|
+| Does the SPI controller probe? | yes, `spi0` registers, FIFO mode |
+| Are clocks/ICC/pins right? | yes, all verified (clk_summary, pinmux-pins) |
+| Does the SE execute a command? | **no** — `SE_GENI_STATUS` stays 0, no error bits |
+| Does mainline need the QUP firmware here? | unknown; the loader exists but nothing in mainline calls it, and calling it panics |
+| Did anything on wrapper 1 ever work? | no. i2c1 (wrapper 0) works, nothing has ever exercised wrapper 1 |
+
+## Recommended next steps (cheapest first)
+
+1. **Cross-check wrapper 1 with UART7** (`a88000.serial`, SE2, IRQ 355, clock
+   `GCC_QUPV3_WRAP1_S2_CLK`, pinctrl `qup_uart7_tx`/`qup_uart7_rx` already in the SoC
+   dtsi). If UART7 also fails to complete a transfer, wrapper 1 is unusable as
+   configured and the problem is above the SE (wrapper/QUP core/firmware). If UART7
+   works, the problem is SPI-specific on SE1.
+2. **Diff our SPI node against the vendor's property by property**, including the
+   extra `m-ahb`/`s-ahb` clocks on the SE (try adding them to the SE in addition to the
+   wrapper) and `GCC_QUPV3_WRAP1_CORE_2X_CLK` (currently never enabled).
+3. **Ask the vendor kernel**: the stock `msm_drm.ko` trick worked for display; the vendor
+   QUP/SPI driver is built into its 5.10 kernel. Comparing `msm_geni_serial`/`spi-geni`
+   vendor code paths against mainline would show whether they enable something we do
+   not (e.g. a "QUP core 2x" clock, a `SE_GENI_...` gear write, or an SCM call).
+4. Only after 1-3: revisit the QUP firmware route, with the loader split into
+   "parse ELF only" vs "program PROG_RAM" so a crash points at the exact step.
+
+## Stable artefacts for the next session
+
+| Path | What |
+|---|---|
+| `shim/out/sky-t14-spi-ok-no-fw.img` | current known-good image (no touch, SPI controller up) |
+| `shim/out/sky-m7f-safe-no-touch.img` | older known-good fallback (no SPI node at all) |
+| `shim/out/sky-t8-wrapper-ahb.img` | same as t14 but with the AHB-clock fix as the only delta |
+| kernel probes | `sky-spi-xfer` / `sky-spi-irq` in `drivers/spi/spi-geni-qcom.c` |
