@@ -1,0 +1,18 @@
+# vendor driver (drivers/input/touchscreen/nt36xxx-spi/), firmware download stage
+[NVT-ts-spi] update_firmware_request 304: filename is novatek/nt36672c.bin
+NVT-ts-spi spi0.0: Direct firmware load for novatek/nt36672c.bin failed with error -2   # before the file was installed
+[NVT-ts-spi] CTP_SPI_WRITE 179: error, ret=-110
+[NVT-ts-spi] nvt_write_sram 393: write to sram failed, ret = -5
+[NVT-ts-spi] nvt_write_firmware 449: sram program failed, ret = -5
+[NVT-ts-spi] nvt_download_firmware_hw_crc 666: Write_Firmware failed. (-5)
+[NVT-ts-spi] nvt_download_firmware_hw_crc 693: error, retry=3
+[NVT-ts-spi] nvt_read_bld_hw_crc 593: crc_done = 0, ilm_crc_flag = 0, dlm_crc_flag = 0
+[NVT-ts-spi] nvt_read_bld_hw_crc 615: ilm: bin crc = 0x94EDF739, golden = 0x00000000
+[NVT-ts-spi] nvt_read_bld_hw_crc 637: dlm: bin crc = 0xF699E909, golden = 0x00000000
+[NVT-ts-spi] nvt_update_firmware 807: Download Firmware failed. (-5)
+[NVT-ts-spi] nvt_ts_probe 1505: download firmware failed
+
+# what works in the same driver
+[NVT-ts-spi] nvt_ts_check_chip_ver_trim 1148: buf[0]=0x04
+[NVT-ts-spi] nvt_ts_check_chip_ver_trim 1149: buf[1]=0x0C, buf[2]=0x00, buf[3]=0x00, buf[4]=0x72, buf[5]=0x66, buf[6]=0x03
+[NVT-ts-spi] nvt_ts_check_chip_ver_trim 1169: This is NVT touch IC

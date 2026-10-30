@@ -1,0 +1,16 @@
+# sky-spi-xfer / sky-spi-irq probes in drivers/spi/spi-geni-qcom.c
+
+# a failing write: SE never starts
+sky-spi-xfer: speed=1000000 cur=1000000 se_clk=19200000 status=00000000 m_cmd0=00000000
+NVT-ts-spi spi0.0: SPI transfer timed out
+sky-spi-irq:  m_irq=00000021 status=00000000 m_cmd0=18000000 s_irq=00000000
+spi_master spi0: failed to transfer one message from queue
+
+# FIFO mode (dmas removed): same, endlessly
+sky-spi-xfer: speed=1000000 cur=1000000 se_clk=19200000 status=00000000 m_cmd0=00000000
+NVT-ts-spi spi0.0: SPI transfer timed out
+sky-spi-irq:  m_irq=00000021 status=00000000 m_cmd0=18000000 s_irq=00000000
+
+# GPI DMA without iommus (T22): unhandled interrupt, box hangs
+sky-spi-xfer: speed=1000000 cur=0 se_clk=19200000 status=00000000 m_cmd0=00000000
+gpi a00000.dma-controller: Unhandled interrupt status:0x40

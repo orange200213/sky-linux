@@ -1,0 +1,27 @@
+/* sky: wrapper-1 GPI DMA; required, the SE never executes FIFO transfers */
+&soc {
+	gpi_dma1: dma-controller@a00000 {
+		compatible = "qcom,sm4450-gpi-dma", "qcom,sm6350-gpi-dma";
+		reg = <0x0 0x00a00000 0x0 0x60000>;
+		interrupts = <GIC_SPI 279 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 280 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 281 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 282 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 283 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 284 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 293 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 294 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 295 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 296 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 297 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 298 IRQ_TYPE_LEVEL_HIGH>;
+		dma-channels = <12>;
+		/* Channels 1..5 are usable on this SM4450 GPI instance. */
+		dma-channel-mask = <0xfff>;
+		iommus = <&apps_smmu 0x416 0>;
+		#dma-cells = <3>;
+		status = "okay";
+	};
+};
+
+&qupv3_id_0 {

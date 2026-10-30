@@ -1,0 +1,27 @@
+928-	struct spi_geni_master *dbg_mas = spi_controller_get_devdata(spi);
+929-
+930:	pr_info("sky-spi-xfer: speed=%u cur=%u se_clk=%lu status=%08x m_cmd0=%08x\n",
+931-		xfer->speed_hz, dbg_mas->cur_speed_hz,
+932-		clk_get_rate(dbg_mas->se.clk),
+933-		readl_relaxed(dbg_mas->se.base + SE_GENI_STATUS),
+934-		readl_relaxed(dbg_mas->se.base + SE_GENI_M_CMD0));
+935-	struct spi_geni_master *mas = spi_controller_get_devdata(spi);
+936-	int ret;
+937-
+938-	if (spi_geni_is_abort_still_pending(mas))
+939-		return -EBUSY;
+940-
+--
+967-		return IRQ_NONE;
+968-
+969:	pr_info("sky-spi-irq: m_irq=%08x status=%08x m_cmd0=%08x s_irq=%08x\n",
+970-		m_irq, readl_relaxed(se->base + SE_GENI_STATUS),
+971-		readl_relaxed(se->base + SE_GENI_M_CMD0),
+972-		readl_relaxed(se->base + SE_GENI_S_IRQ_STATUS));
+973-
+974-	trace_geni_spi_irq(mas->dev, m_irq, dma_tx_status, dma_rx_status);
+975-
+976-	if (m_irq & (M_CMD_OVERRUN_EN | M_ILLEGAL_CMD_EN | M_CMD_FAILURE_EN |
+977-		     M_RX_FIFO_RD_ERR_EN | M_RX_FIFO_WR_ERR_EN |
+978-		     M_TX_FIFO_RD_ERR_EN | M_TX_FIFO_WR_ERR_EN)) {
+979-		dev_warn(mas->dev, "Unexpected IRQ err status %#010x\n", m_irq);

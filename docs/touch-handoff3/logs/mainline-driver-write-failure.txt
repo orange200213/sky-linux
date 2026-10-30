@@ -1,0 +1,13 @@
+# mainline regmap driver (drivers/input/touchscreen/nt36xxx-ml/), after the read fix
+
+# before the fix (read returned zeros)
+nt36xxx-ml spi0.0: nt36xxx_chip_version_init buf[0]=0x00, buf[1]=0x00, buf[2]=0x00, buf[3]=0x00, buf[4]=0x00, buf[5]=0x00, buf[6]=0x00 sz=3
+nt36xxx-ml spi0.0: NVT touch IC hw not found i=6 list=2
+
+# after: one full-duplex message of (val_size + 2), payload from rx + 2
+nt36xxx-ml spi0.0: nt36xxx_chip_version_init buf[0]=0x0C, buf[1]=0x00, buf[2]=0x00, buf[3]=0x72, buf[4]=0x66, buf[5]=0x03, buf[6]=0xFF sz=3
+
+# chip identified, then the write path fails like the vendor driver
+nt36xxx-ml spi0.0: SPI transfer timed out
+nt36xxx-ml spi0.0: transfer err -110
+nt36xxx-ml spi0.0: Firmware reset failed.

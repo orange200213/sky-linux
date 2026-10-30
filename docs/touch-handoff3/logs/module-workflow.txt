@@ -1,0 +1,13 @@
+# swapping the mainline driver in and out over SSH (no flashing)
+
+insmod /lib/modules/7.3.0-g4e6c68989319-dirty/extra/nt36xxx-ml.ko
+nt36xxx-ml spi0.0: no irq available, running without interrupts
+nt36xxx-ml spi0.0: supply vdd not found, using dummy regulator
+nt36xxx-ml spi0.0: supply vio not found, using dummy regulator
+
+# IRQ note: the TLMM refuses to map gpio13 for the interrupt,
+#   irq: type mismatch, failed to map hwirq-13 for pinctrl@f100000!
+# so the driver needs an irq-gpios property; the vendor driver gets irq 161 at boot.
+
+rmmod nt36xxx_ml                     # roll back, then re-bind the built-in driver:
+echo spi0.0 > /sys/bus/spi/drivers/NVT-ts-spi/bind
