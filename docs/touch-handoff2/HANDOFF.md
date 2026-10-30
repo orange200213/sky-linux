@@ -303,3 +303,60 @@ Sources were fetched into `kernel/min-tree/drivers/input/touchscreen/nt36xxx-ml/
 yet**, so they do not affect the build. Next session: add a `CONFIG_TOUCHSCREEN_NT36XXX_ML`
 tristate entry, build it as a module, add `novatek,nvt-ts-spi` to its `of_match_table`, and
 load it over SSH exactly like section 12 describes.
+
+---
+
+## 14. Tried the sm7150-mainline driver on the device (over SSH, no flashing)
+
+Wired it in as a module so it can coexist with the vendor driver:
+
+* `drivers/input/touchscreen/nt36xxx-ml/{nt36xxx.h,nt36xxx_core.c,nt36xxx_spi.c}` (fetched,
+  unmodified except as noted below)
+* `drivers/input/touchscreen/nt36xxx-ml/Kconfig` + `Makefile` → module **`nt36xxx-ml.ko`**
+  (`obj-$(CONFIG_TOUCHSCREEN_NT36XXX_ML) += nt36xxx-ml.o`,
+  `nt36xxx-ml-y := nt36xxx_core.o nt36xxx_spi.o`; the Kconfig is sourced from the parent)
+* patches applied while testing:
+  1. `of_match_table` gained `"novatek,nvt-ts-spi"` (our DT's compatible; upstream only has
+     `novatek,nt36xxx-spi`, so without this it never even matches),
+  2. `interrupts` made optional (our DT's `interrupts` fails to map: the TLMM domain answers
+     `irq: type mismatch, failed to map hwirq-13 for pinctrl@f100000`, exactly why the
+     driver needs the `irq-gpios` property),
+  3. the chip-id dump switched from `dev_dbg` to `dev_info`.
+
+Result on the device:
+
+```
+nt36xxx-ml spi0.0: no irq available, running without interrupts
+nt36xxx-ml spi0.0: supply vdd not found, using dummy regulator
+nt36xxx-ml spi0.0: supply vio not found, using dummy regulator
+nt36xxx-ml spi0.0: nt36xxx_chip_version_init buf[0]=0x00 ... buf[6]=0x00 sz=3
+nt36xxx-ml spi0.0: NVT touch IC hw not found i=6 list=2
+nt36xxx-ml spi0.0: Failed to check chip version
+nt36xxx-ml spi0.0: probe with driver nt36xxx-ml failed with error -2
+```
+
+So: it **builds, registers, binds and reaches the chip-id stage**, but its read returns all
+zeros where the vendor driver reads `04 0C 00 00 72 66 03`. Its own transport
+(`spi_write(0xFF, page…)` then `spi_write_then_read(1 byte, N)`) needs comparing against
+the vendor `CTP_SPI_READ` — most likely the missing dummy/status byte or a different page
+programming sequence. Two more things to fix when continuing:
+
+* `trim_id_table` is mostly behind `#if 0` and the enabled fallback entry `{ }` matches
+  *everything* with `mapid = 0`, which makes the loop always end in "hw not found" — even
+  our chip (`buf[1..6] = 0C 00 00 72 66 03`) would match the enabled
+  `NT36675_IC` entry if the read worked;
+* `irq-gpios`/`reset-gpios` in the DT plus a viable way to map GPIO 13 as an IRQ (the TLMM
+  mapping currently fails with "type mismatch").
+
+The module stays in the tree (`CONFIG_TOUCHSCREEN_NT36XXX_ML=m`) so it builds with
+`make modules` and can be pushed over SSH in seconds; it does **not** touch the kernel
+Image, so the flashed boot image is unaffected.
+
+## 15. Where to go next, in priority order
+
+1. Debug the mainline driver's read sequence against the vendor one (dummy byte / page
+   programming). If its read works, its regmap write path is the best candidate to fix the
+   4 KB `-110` timeout, and the vendor driver can be dropped entirely.
+2. Otherwise instrument the vendor driver + `spi-geni-qcom.c` TX path for a large transfer
+   (`dmaengine_prep_slave_sg`, `SE_GENI_STATUS`, `M_CMD0` after the command).
+3. Only then revisit the "SE in GSI DMA mode + QUP firmware" theory.
