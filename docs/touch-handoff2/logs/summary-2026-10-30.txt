@@ -1,0 +1,33 @@
+Captured from the device during the touch bring-up (kernel 7.3, builds #80-#86).
+
+--- chip detected, input device registered (T20, DMA, firmware download off) ---
+[    0.257922] [NVT-ts-spi] nvt_ts_probe 1253: probe start
+[    0.258038] [NVT-ts-spi] nvt_ts_probe 1293: mode=0, max_speed_hz=1000000
+[    0.258161] [NVT-ts-spi] nvt_parse_dt 700: SWRST_N8_ADDR=0x03F0FE
+[    0.258197] [NVT-ts-spi] nvt_parse_dt 709: SPI_RD_FAST_ADDR=0x03F310
+[    0.258233] [NVT-ts-spi] nvt_parse_dt 714: Unable to get touchscreen firmware name
+[    0.284380] [NVT-ts-spi] nvt_ts_check_chip_ver_trim 1148: buf[0]=0x04
+[    0.284471] [NVT-ts-spi] nvt_ts_check_chip_ver_trim 1149: buf[1]=0x0C, buf[2]=0x00, buf[3]=0x00, buf[4]=0x72, buf[5]=0x66, buf[6]=0x03
+[    0.284563] [NVT-ts-spi] nvt_ts_check_chip_ver_trim 1169: This is NVT touch IC
+[    0.284632] [NVT-ts-spi] nvt_ts_probe 1367: Set default fw_ver=0, x_num=32, y_num=50, abs_x_max=1080, abs_y_max=2460, max_button_num=0!
+[    0.284908] input: NVTCapacitiveTouchScreen as /devices/virtual/input/input3
+[    0.286665] [NVT-ts-spi] nvt_ts_probe 1470: request irq 154 succeed
+#   IRQ 154 = msmgpio 13, NVT-ts-spi
+
+--- firmware found, download starts, WRITE fails (T21, DMA 1 MHz) ---
+[    6.470467] NVT-ts-spi spi0.0: Direct firmware load for novatek/nt36672c.bin failed with error -2   (firmware was not on the rootfs yet)
+[  148.756577] [NVT-ts-spi] CTP_SPI_WRITE 179: error, ret=-5
+[  148.760397] [NVT-ts-spi] nvt_write_sram 384: set page failed, ret = -5
+[  148.764268] [NVT-ts-spi] nvt_write_firmware 449: sram program failed, ret = -5
+[  148.767503] [NVT-ts-spi] nvt_download_firmware_hw_crc 666: Write_Firmware failed. (-5)
+[  157.428359] [NVT-ts-spi] CTP_SPI_WRITE 179: error, ret=-5
+
+--- FIFO mode is unusable (T24): SE never executes, endless retry ---
+sky-spi-xfer: speed=1000000 cur=1000000 se_clk=19200000 status=00000000 m_cmd0=00000000
+NVT-ts-spi spi0.0: SPI transfer timed out
+sky-spi-irq:  m_irq=00000021 status=00000000 m_cmd0=18000000 s_irq=00000000
+spi_master spi0: failed to transfer one message from queue
+
+--- GPI DMA without iommus panics (T22) ---
+sky-spi-xfer: speed=1000000 cur=0 se_clk=19200000 status=00000000 m_cmd0=00000000
+gpi a00000.dma-controller: Unhandled interrupt status:0x40      -> box hangs

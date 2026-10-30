@@ -1,0 +1,31 @@
+	spi_touch: spi@a84000 {
+		compatible = "qcom,geni-spi";
+		reg = <0x0 0x00a84000 0x0 0x4000>;
+		clocks = <&gcc GCC_QUPV3_WRAP1_S1_CLK>,
+			 <&gcc GCC_QUPV3_WRAP1_CORE_CLK>;
+		clock-names = "se", "core";
+		interrupts = <GIC_SPI 354 IRQ_TYPE_LEVEL_HIGH>;
+		dmas = <&gpi_dma1 0 1 QCOM_GPI_SPI>,
+		       <&gpi_dma1 1 1 QCOM_GPI_SPI>;
+		dma-names = "tx", "rx";
+		pinctrl-names = "default";
+		pinctrl-0 = <&qup_spi1_default>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+
+		touchscreen@0 {
+			compatible = "novatek,nvt-ts-spi";
+			reg = <0>;
+			status = "okay";
+			firmware-name = "novatek/nt36672c.bin";
+			spi-max-frequency = <2400000>;
+			novatek,swrst-n8-addr = <0x3f0fe>;
+			novatek,spi-rd-fast-addr = <0x3f310>;
+			interrupt-parent = <&tlmm>;
+			interrupts = <13 IRQ_TYPE_EDGE_FALLING>;
+			reset-gpios = <&tlmm 12 GPIO_ACTIVE_LOW>;
+			touchscreen-size-x = <1080>;
+			touchscreen-size-y = <2460>;
+		};
+	};
