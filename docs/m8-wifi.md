@@ -263,6 +263,25 @@ qcom,snoc-ahb;                 /* in the wifi node */
   `qcom,msa-fixed-perm` (already in the node) means the TZ keeps the
   permissions, so no `qcom_scm_assign_mem()` call is needed.
 
+First run of phase 1 (kernel `#63`, flashed): everything up to the MSA
+handshake works —
+
+```
+ath11k 22800000.wifi: snoc mode: membase registers, per-CE interrupts
+ath11k 22800000.wifi: snoc mode: extended interrupts not configured
+ath11k 22800000.wifi: msa 0x82a00000+0x300000, 2 region(s)
+ath11k 22800000.wifi: host capability request failed: 1 90
+ath11k 22800000.wifi: failed to send qmi host cap: -22
+```
+
+`msa_mem_info` is accepted by the firmware (it returns two memory regions) and
+the per-CE interrupts are registered. The next message, `host_cap`, is
+rejected with QMI error **90 = `QMI_ERR_INCOMPATIBLE_STATE_V01`** — which is
+exactly why the vendor's ADRASTEA sequence has no `host_cap` at all. Kernel
+`#64` therefore skips it in SNOC mode (the boot image
+`wifi-backup/out/sky-shim-boot-v4-wifi-k64-snoc.img` is built, verified and
+**not flashed yet**).
+
 The matching DTB is `wifi-backup/wifi-snoc-fdt.dtb` (built from the live DT by
 `wifi-backup/patch-fdt-snoc.py`): the stock SNOC node (membase, 12 per-CE IRQs,
 SID 0x4c0, four rails) plus `qcom,rproc`, the wlan smp2p state,

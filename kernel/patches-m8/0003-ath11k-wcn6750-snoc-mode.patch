@@ -4,20 +4,6 @@ Subject: [PATCH 3/3] wifi: ath11k: add SNOC (icnss) mode for the WCN6750 variant
 The stock firmware of this board implements only the SNOC host interface
 (qcom,icnss node: registers at "membase", one GIC interrupt per copy engine,
 no MSI, no QMI DEVICE_INFO), while upstream ath11k implements the hybrid/
-IPCI variant. With a DT opt-in ("qcom,snoc-ahb") the driver now:
-
-  * keeps the wcn6750 windowed register access but takes ab->mem from the DT
-    "membase" resource instead of the QMI DEVICE_INFO BAR (hybrid_bus_type
-    off, so ath11k_qmi_request_device_info() is a no-op),
-  * requests the copy-engine interrupts by index like ath10k/snoc.c does,
-  * sends the WLFW MSA handshake (msa_mem_info + msa_ready, message ids and
-    element tables taken from ath10k/qmi_wlfw_v01.[ch]) before the target
-    cap / BDF download, which is what the icnss/ADRASTEA start sequence does.
-
-Extended interrupts are not configured yet: the SNOC variant does not
-describe them in its DT.
----
-
 diff --git a/drivers/net/wireless/ath/ath11k/ahb.c b/drivers/net/wireless/ath/ath11k/ahb.c
 index ec5bf5c9f..b68716227 100644
 --- a/drivers/net/wireless/ath/ath11k/ahb.c
@@ -98,7 +84,7 @@ index 8c1eb1e8e..e48807bbe 100644
  
  static inline struct ath11k_ahb *ath11k_ahb_priv(struct ath11k_base *ab)
 diff --git a/drivers/net/wireless/ath/ath11k/qmi.c b/drivers/net/wireless/ath/ath11k/qmi.c
-index 7dc07339b..ba2212c74 100644
+index 7dc07339b..916703427 100644
 --- a/drivers/net/wireless/ath/ath11k/qmi.c
 +++ b/drivers/net/wireless/ath/ath11k/qmi.c
 @@ -1705,6 +1705,206 @@ static const struct qmi_elem_info qmi_wlfw_fw_init_done_ind_msg_v01_ei[] = {
@@ -308,10 +294,14 @@ index 7dc07339b..ba2212c74 100644
  /* clang stack usage explodes if this is inlined */
  static noinline_for_stack
  int ath11k_qmi_host_cap_send(struct ath11k_base *ab)
-@@ -3000,6 +3200,20 @@ static int ath11k_qmi_event_server_arrive(struct ath11k_qmi *qmi)
+@@ -3000,10 +3200,29 @@ static int ath11k_qmi_event_server_arrive(struct ath11k_qmi *qmi)
  		return ret;
  	}
  
+-	ret = ath11k_qmi_host_cap_send(ab);
+-	if (ret < 0) {
+-		ath11k_warn(ab, "failed to send qmi host cap: %d\n", ret);
+-		return ret;
 +	if (ath11k_qmi_is_snoc(ab)) {
 +		ret = ath11k_qmi_msa_info_send(ab);
 +		if (ret < 0) {
@@ -326,9 +316,18 @@ index 7dc07339b..ba2212c74 100644
 +		}
 +	}
 +
- 	ret = ath11k_qmi_host_cap_send(ab);
- 	if (ret < 0) {
- 		ath11k_warn(ab, "failed to send qmi host cap: %d\n", ret);
++	/* The SNOC/icnss start sequence has no host_cap: after the MSA handshake
++	 * the firmware answers it with QMI_ERR_INCOMPATIBLE_STATE (90).
++	 */
++	if (!ath11k_qmi_is_snoc(ab)) {
++		ret = ath11k_qmi_host_cap_send(ab);
++		if (ret < 0) {
++			ath11k_warn(ab, "failed to send qmi host cap: %d\n", ret);
++			return ret;
++		}
+ 	}
+ 
+ 	if (!ab->hw_params.fixed_fw_mem)
 diff --git a/drivers/net/wireless/ath/ath11k/qmi.h b/drivers/net/wireless/ath/ath11k/qmi.h
 index 350816c81..fff10aa28 100644
 --- a/drivers/net/wireless/ath/ath11k/qmi.h
