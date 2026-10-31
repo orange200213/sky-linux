@@ -14,7 +14,7 @@
 /* FW Param address */
 #define NT36XXX_FW_ADDR		0x01
 
-#define NT36XXX_TRANSFER_LEN	(63*1024)
+#define NT36XXX_TRANSFER_LEN	(16*1024)
 
 /* due to extra framework layer, the transfer trunk is as small as
  * 128 otherwize dma error happened, all routed to spi_sync()
@@ -31,6 +31,14 @@
 
 /* Point data length */
 #define POINT_DATA_LEN		65
+
+/*
+ * Each report point is six bytes: status/id, X high, X low, Y high, Y low,
+ * weight.  X and Y are big-endian and are expressed in 1/10 of a panel
+ * pixel, so their full scale is ten times the panel resolution that the IC
+ * reports in FWINFO (1080x2460 for this panel).
+ */
+#define NT36XXX_RAW_UNITS_PER_PX 10
 
 /* Misc */
 #define NT36XXX_NUM_SUPPLIES	 2
@@ -96,7 +104,6 @@ struct nt36xxx_abs_object {
 	u16 x;
 	u16 y;
 	u16 z;
-	u8 tm;
 };
 
 struct nt36xxx_fw_info {
@@ -132,5 +139,6 @@ int nt36xxx_probe(struct device *dev, int irq, const struct input_id *id,
 
 extern const struct dev_pm_ops nt36xxx_pm_ops;
 extern const u32 nt36675_memory_maps[];
+extern const u32 nt36672a_memory_maps[];
 
 #endif

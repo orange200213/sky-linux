@@ -188,8 +188,9 @@ static int nt36xxx_spi_probe(struct spi_device *spi)
 const struct nt36xxx_chip_data novatek_nt36xxx = {
 	.config = &nt36xxx_regmap_config_32bit,
 	.mmap = nt36675_memory_maps,
+	/* Panel resolution as reported by the IC in FWINFO (0x0438 x 0x099c). */
 	.abs_x_max = 1080,
-	.abs_y_max = 2400,
+	.abs_y_max = 2460,
 	.id = &nt36xxx_spi_input_id,
 };
 

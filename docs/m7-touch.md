@@ -107,10 +107,14 @@ spi_touch: spi@a84000 {
 
 ## Driver
 
-The driver is the **mainline-oriented regmap port** from `sm7150-mainline/linux`
-(`nt36xxx_core.c` + `nt36xxx_spi.c` + `nt36xxx.h`), not the 200 KB vendor import. It lives in
-the repo at `kernel/drivers/touchscreen/nt36xxx/` with `CONFIG_TOUCHSCREEN_NT36XXX_ML`;
-local changes on top of upstream:
+The driver started as the **mainline-oriented regmap port** from `sm7150-mainline/linux`
+(`nt36xxx_core.c` + `nt36xxx_spi.c` + `nt36xxx.h`, ~1230 lines) and was then extended to the
+version that actually runs (~1880 lines). Both files live in the repo at
+`kernel/drivers/touchscreen/nt36xxx/`; the exact validated copies are also in
+`build/archives/handoff13-runtime-recovery-20261101/source/` (sha256 in that folder's
+`SHA256SUMS`). Kconfig symbol: `CONFIG_TOUCHSCREEN_NT36XXX_ML`.
+
+Changes on top of upstream, in the order they were needed:
 
 1. our `compatible = "novatek,nvt-ts-spi"` added to `of_match_table`;
 2. **read path** rewritten to the vendor sequence: one full-duplex SPI message of
@@ -118,11 +122,23 @@ local changes on top of upstream:
    with no dummy bytes and read zeros);
 3. **chip-id compare** fixed: `buf[i]` instead of `buf[i + 1]`, and the empty sentinel table
    entry (`mapid == 0`, which matches everything) is skipped;
-4. IRQ made optional at probe so a refused GPIO mapping is not fatal;
-5. runtime recovery, see below (`kernel/patches/0004-nt36xxx-lock-and-hw-reset-recovery.patch`).
+4. IRQ made optional at probe so a refused GPIO mapping is not fatal (`irq-gpios` is the
+   property that actually works on this board);
+5. firmware download / verification helpers: `nt36xxx_download_firmware_hw_crc()`,
+   `nt36xxx_sky_verify()`, `nt36xxx_sky_dump_crc()`, `nt36xxx_sky_write_part()`,
+   `nt36xxx_sky_bad_blocks()`, plus the diagnostic `nt36xxx_tx_size_sweep()`;
+6. reporting and scaling: `nt36xxx_wait_first_report()`, `nt36xxx_report()`,
+   `nt36xxx_scale_coord()`, `sky-report[0..2]` diagnostics;
+7. runtime recovery: `nt36xxx_health_work()`, `nt36xxx_sky_schedule_recover()`,
+   `nt36xxx_hw_reset()` and the `ts->lock` serialisation
+   (`kernel/patches/0004-nt36xxx-lock-and-hw-reset-recovery.patch`);
+8. DRM panel-follower hooks (`panel_prepared` / `panel_unpreparing`) so the touch controller
+   follows the panel: it is re-initialised on wake and told to sleep
+   (`ENTER_SLEEP` to `EVENT_BUF_ADDR | 0x50`) on suspend.
 
-Why the regmap port: it caps transfers at `spi_max_transfer_size()` instead of handing the
-controller one multi-kilobyte buffer, which is what the QUP dislikes.
+Why the regmap port rather than the vendor import: it caps transfers at
+`spi_max_transfer_size()` instead of handing the controller one multi-kilobyte buffer, which
+is what the QUP dislikes, and it is small enough to reason about.
 
 ## Runtime recovery (why the box no longer needs a reboot)
 

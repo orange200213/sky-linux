@@ -79,6 +79,15 @@ enum {
 
 static struct drm_panel_follower_funcs nt36xxx_panel_follower_funcs;
 
+/* Bounded firmware re-init: the vendor WDT recovery threshold and a cap. */
+#define NT36XXX_FW_RESET_LIMIT	10
+#define NT36XXX_RECOVER_LIMIT	5
+#define NT36XXX_RECOVER_FAST_MS	2000
+#define NT36XXX_RECOVER_SLOW_MS	60000
+#define NT36XXX_HEALTH_PERIOD_MS 2000
+
+static int sky_fw_attempts;
+
 struct nt36xxx_ts {
 	struct regmap *regmap;
 
@@ -103,6 +112,15 @@ struct nt36xxx_ts {
 	struct drm_panel_follower panel_follower;
 
 	struct delayed_work work;
+	struct delayed_work health_work;
+
+	/* firmware-reset handling: bounded, rate limited re-init */
+	unsigned int fw_reset_cnt;
+	unsigned int recover_tries;
+	unsigned long recover_time;
+	unsigned int health_bad;
+	unsigned int report_log_cnt;
+	bool quiet_init;
 
 	/* this is a duplicate with nt36xxx_chip_data and since the address might
 	 * change in boot/init/download stages so make it a copy of initial map and
@@ -117,6 +135,8 @@ struct nt36xxx_ts {
 	uint8_t hw_crc;
 
 	struct firmware fw_entry; /* containing request fw data */
+	u8 *fw_raw;              /* firmware image loaded in probe, DMA-capable */
+	size_t fw_raw_size;
 	const char *firmware_path;
 	const struct nt36xxx_chip_data *data;
 };
@@ -235,6 +255,51 @@ const u32 nt36675_memory_maps[] = {
 	[MMAP_TOP_ADDR] = 0xffffff,
 };
 
+/*
+ * NT36672A runtime map (vendor NT36672A_memory_map).  Kept for reference and
+ * for future chips whose trim id selects it; the trim id of this device
+ * (0x0C,0xFF,0xFF,0x72,0x66,0x03) selects NT36675 (mapid 68), exactly as the
+ * vendor trim_id_table does, so this table is NOT used here.
+ */
+const u32 nt36672a_memory_maps[] = {
+	[MMAP_EVENT_BUF_ADDR] = 0x21C00,
+	[MMAP_RAW_PIPE0_ADDR] = 0x20000,
+	[MMAP_RAW_PIPE1_ADDR] = 0x23000,
+	[MMAP_BASELINE_ADDR] = 0x20BFC,
+	[MMAP_BASELINE_BTN_ADDR] = 0x23BFC,
+	[MMAP_DIFF_PIPE0_ADDR] = 0x206DC,
+	[MMAP_DIFF_PIPE1_ADDR] = 0x236DC,
+	[MMAP_RAW_BTN_PIPE0_ADDR] = 0x20510,
+	[MMAP_RAW_BTN_PIPE1_ADDR] = 0x23510,
+	[MMAP_DIFF_BTN_PIPE0_ADDR] = 0x20BF0,
+	[MMAP_DIFF_BTN_PIPE1_ADDR] = 0x23BF0,
+	[MMAP_READ_FLASH_CHECKSUM_ADDR] = 0x24000,
+	[MMAP_RW_FLASH_DATA_ADDR] = 0x24002,
+	[MMAP_BOOT_RDY_ADDR] = 0x3F10D,
+	[MMAP_BLD_LENGTH_ADDR] = 0x3F10E,
+	[MMAP_ILM_LENGTH_ADDR] = 0x3F118,
+	[MMAP_DLM_LENGTH_ADDR] = 0x3F130,
+	[MMAP_BLD_DES_ADDR] = 0x3F114,
+	[MMAP_ILM_DES_ADDR] = 0x3F128,
+	[MMAP_DLM_DES_ADDR] = 0x3F12C,
+	[MMAP_G_ILM_CHECKSUM_ADDR] = 0x3F100,
+	[MMAP_G_DLM_CHECKSUM_ADDR] = 0x3F104,
+	[MMAP_R_ILM_CHECKSUM_ADDR] = 0x3F120,
+	[MMAP_R_DLM_CHECKSUM_ADDR] = 0x3F124,
+	[MMAP_BLD_CRC_EN_ADDR] = 0x3F30E,
+	[MMAP_DMA_CRC_EN_ADDR] = 0x3F132,
+	[MMAP_BLD_ILM_DLM_CRC_ADDR] = 0x3F133,
+	[MMAP_DMA_CRC_FLAG_ADDR] = 0x3F134,
+
+	[MMAP_SPI_RD_FAST_ADDR] = 0x03F310,
+	[MMAP_SWRST_N8_ADDR] = 0x03F0FE,
+
+	[MMAP_ENG_RST_ADDR] = 0x7FFF80,
+	[MMAP_MAGIC_NUMBER_0X1F64E_ADDR] = 0x1F64E,
+
+	[MMAP_TOP_ADDR] = 0xffffff,
+};
+
 void _debug_irq(struct nt36xxx_ts *ts, int line){
 	struct irq_desc *desc;
 	desc = irq_data_to_desc( irq_get_irq_data(ts->irq));
@@ -279,6 +344,35 @@ static int nt36xxx_eng_reset_idle(struct nt36xxx_ts *ts)
 }
 
 /**
+ * nt36xxx_hw_reset - Pulse the touch controller's reset pin
+ * @ts: Main driver structure
+ *
+ * Port of the vendor recovery step (nt36xxx_fw_update.c,
+ * nvt_download_firmware_hw_crc): hold TP_RST asserted while the engineering
+ * reset command is sent, then release it and wait tRT2BRST before the
+ * bootloader reset.  A firmware that crashed cannot be recovered by software
+ * alone - the MCU stays wedged until this pin is pulsed, which is exactly why
+ * only a reboot restored touch before.
+ */
+static void nt36xxx_hw_reset(struct nt36xxx_ts *ts)
+{
+	if (!ts->reset_gpio)
+		return;
+
+	/* reset-gpios is GPIO_ACTIVE_LOW: logical 1 asserts TP_RST */
+	gpiod_set_value_cansleep(ts->reset_gpio, 1);
+	mdelay(1);
+
+	/* the MCU samples the engineering reset while TP_RST is held */
+	nt36xxx_eng_reset_idle(ts);
+
+	gpiod_set_value_cansleep(ts->reset_gpio, 0);
+	msleep(10);
+
+	dev_info(ts->dev, "sky-recover: TP_RST pulsed\n");
+}
+
+/**
  * nt36xxx_bootloader_reset - Reset MCU to bootloader
  * @ts: Main driver structure
  *
@@ -311,6 +405,129 @@ static int nt36xxx_bootloader_reset(struct nt36xxx_ts *ts)
 	return ret;
 }
 
+/* read SRAM back and compare with the firmware image (diagnostics only) */
+static void __maybe_unused nt36xxx_sky_verify(struct nt36xxx_ts *ts, int idx, const char *when)
+{
+	const u32 chunk = 4096;
+	u32 off, size, bad_chunks = 0, first_bad = 0xffffffff;
+	u8 want_b, got_b = 0;
+	u8 *buf;
+	int ret;
+
+	if (!ts->bin_map || !ts->fw_entry.data || !ts->bin_map[idx].size)
+		return;
+
+	size = ts->bin_map[idx].size + 1;
+	buf = kmalloc(chunk, GFP_KERNEL);
+	if (!buf)
+		return;
+
+	for (off = 0; off < size; off += chunk) {
+		u32 n = min(chunk, size - off);
+		u32 k;
+
+		ret = regmap_raw_read(ts->regmap, ts->bin_map[idx].sram_addr + off, buf, n);
+		if (ret) {
+			dev_err(ts->dev, "sky-verify[%s] %s read failed at off=0x%x ret=%d\n",
+				when, ts->bin_map[idx].name, off, ret);
+			break;
+		}
+		if (memcmp(buf, ts->fw_entry.data + ts->bin_map[idx].bin_addr + off, n)) {
+			u32 diffs = 0;
+
+			for (k = 0; k < n; k++) {
+				if (buf[k] != ts->fw_entry.data[ts->bin_map[idx].bin_addr + off + k]) {
+					diffs++;
+					if (first_bad == 0xffffffff) {
+						first_bad = off + k;
+						want_b = ts->fw_entry.data[ts->bin_map[idx].bin_addr + off + k];
+						got_b = buf[k];
+					}
+				}
+			}
+			bad_chunks++;
+			dev_info(ts->dev, "sky-verify[%s] %s bad off=0x%x diffs=%u/%u\n",
+				 when, ts->bin_map[idx].name, off, diffs, n);
+			if (first_bad != 0xffffffff && off <= first_bad && first_bad < off + n) {
+				u32 m = first_bad - off;
+				u32 lim = min((u32)8, n - m);
+
+				dev_info(ts->dev, "sky-verify[%s]  got : %*phN\n",
+					 when, lim * 2, buf + m);
+				dev_info(ts->dev, "sky-verify[%s]  want: %*phN\n",
+					 when, lim * 2, ts->fw_entry.data + ts->bin_map[idx].bin_addr + first_bad);
+				/* test a few obvious shift hypotheses over 256 B */
+				{
+					static const int shifts[] = { 128, -128, 4096, -4096, 8192, -8192, 16384, -16384 };
+					int si;
+
+					for (si = 0; si < ARRAY_SIZE(shifts); si++) {
+						long so = (long)first_bad + shifts[si];
+						u32 cmplen = 256;
+
+						if (so < 1 || so + cmplen >= (long)size)
+							continue;
+						if (!memcmp(ts->fw_entry.data + ts->bin_map[idx].bin_addr + so,
+							    ts->fw_entry.data + ts->bin_map[idx].bin_addr + first_bad,
+							    cmplen))
+							dev_info(ts->dev, "sky-verify[%s]  shift %+d looks duplicated\n",
+								 when, shifts[si]);
+					}
+					/* does got[m..] match want shifted by +/- k inside the same chunk? */
+					for (k = 1; k < 64; k++) {
+						if (m + k + 32 > n)
+							break;
+						if (!memcmp(buf + m + k,
+							    ts->fw_entry.data + ts->bin_map[idx].bin_addr + first_bad,
+							    32)) {
+							dev_info(ts->dev, "sky-verify[%s]  got is want delayed by %u\n",
+								 when, k);
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+	kfree(buf);
+	dev_info(ts->dev, "sky-verify[%s] %s size=0x%x bad_chunks=%u/%u first_bad=0x%x got=0x%02x want=0x%02x\n",
+		 when, ts->bin_map[idx].name, size, bad_chunks,
+		 (size + chunk - 1) / chunk, first_bad, got_b, want_b);
+}
+
+/* read-only hardware CRC diagnostics (port of vendor nvt_read_bld_hw_crc) */
+static u32 nt36xxx_read_u32(struct nt36xxx_ts *ts, u32 addr)
+{
+	u8 b[4] = { 0 };
+
+	if (regmap_raw_read(ts->regmap, addr, b, sizeof(b)))
+		return 0xdeadbeef;
+
+	return b[0] | b[1] << 8 | b[2] << 16 | (u32)b[3] << 24;
+}
+
+static void nt36xxx_sky_dump_crc(struct nt36xxx_ts *ts)
+{
+	u8 flag = 0;
+
+	/* repeated recovery attempts must not flood the ring buffer */
+	if (!ts->bin_map || ts->quiet_init)
+		return;
+
+	regmap_raw_read(ts->regmap, ts->mmap[MMAP_BLD_ILM_DLM_CRC_ADDR], &flag, 1);
+	dev_info(ts->dev, "sky-crc: flag=0x%02x (done=%d ilm=%d dlm=%d)\n",
+		 flag, !!(flag & 4), !!(flag & 1), !!(flag & 2));
+	dev_info(ts->dev, "sky-crc: ILM bin=0x%08x golden=0x%08x result=0x%08x\n",
+		 ts->bin_map[0].crc,
+		 nt36xxx_read_u32(ts, ts->mmap[MMAP_G_ILM_CHECKSUM_ADDR]),
+		 nt36xxx_read_u32(ts, ts->mmap[MMAP_R_ILM_CHECKSUM_ADDR]));
+	if (ts->fw_data.ilm_dlm_num > 1)
+		dev_info(ts->dev, "sky-crc: DLM bin=0x%08x golden=0x%08x result=0x%08x\n",
+			 ts->bin_map[1].crc,
+			 nt36xxx_read_u32(ts, ts->mmap[MMAP_G_DLM_CHECKSUM_ADDR]),
+			 nt36xxx_read_u32(ts, ts->mmap[MMAP_R_DLM_CHECKSUM_ADDR]));
+}
+
 /**
  * nt36xxx_check_reset_state - Check the boot state during reset
  * @ts: Main driver structure
@@ -322,26 +539,112 @@ static int nt36xxx_check_reset_state(struct nt36xxx_ts *ts,
 				     enum nt36xxx_fw_state fw_state)
 {
 	u8 buf[8] = { 0 };
+	u8 last = 0xff, last2 = 0xff;
 	int ret = 0, retry = NT36XXX_MAX_FW_RST_RETRY;
 
 	do {
 		ret = regmap_raw_read(ts->regmap, ts->mmap[MMAP_EVENT_BUF_ADDR]
 				 | NT36XXX_EVT_RESET_COMPLETE, buf, 6);
+		/*
+		 * This driver's read helper puts the first data byte in buf[0]
+		 * (see nt36xxx_chip_version_init), while the vendor code it was
+		 * ported from reads into buf[1] onwards.  The state byte is the
+		 * first byte after the address, i.e. buf[0].
+		 */
 		if (likely(ret == 0) &&
-		    (buf[1] >= fw_state) &&
-		    (buf[1] <= NT36XXX_STATE_MAX)) {
+		    (buf[0] >= fw_state) &&
+		    (buf[0] <= NT36XXX_STATE_MAX)) {
 			ret = 0;
 			break;
+		}
+		if (!ts->quiet_init && (buf[0] != last || buf[1] != last2)) {
+			dev_info(ts->dev, "sky-state: raw=%*phN (ret=%d, poll %d)\n",
+				 6, buf, ret, NT36XXX_MAX_FW_RST_RETRY - retry);
+			last = buf[0];
+			last2 = buf[1];
 		}
 		usleep_range(10000, 11000);
 	} while (--retry);
 
 	if (!retry) {
-		dev_err(ts->dev, "Firmware reset failed.\n");
+		dev_err(ts->dev, "Firmware reset failed (raw=%*phN want 0x%02x..0x%02x ret=%d).\n",
+			6, buf, fw_state, NT36XXX_STATE_MAX, ret);
 		ret = -EBUSY;
 	}
 
 	return ret;
+}
+
+/**
+ * nt36xxx_scale_coord - Convert a raw report coordinate to a panel pixel
+ * @raw: Raw coordinate as read from the report area
+ * @raw_max: Full scale of the raw coordinate
+ * @px_max: Highest valid panel pixel coordinate
+ *
+ * Return: @raw mapped linearly onto 0..@px_max, clamped at @px_max
+ */
+static u16 nt36xxx_scale_coord(u16 raw, unsigned int raw_max, u16 px_max)
+{
+	u32 scaled = (u32)raw * (px_max + 1) / raw_max;
+
+	return scaled > px_max ? px_max : scaled;
+}
+
+/**
+ * nt36xxx_report_is_fw_reset - Detect the "firmware is not running" report
+ * @point: First bytes of the report area
+ *
+ * The vendor recovery code looks at the six bytes of the first point and
+ * distinguishes two non-report patterns: all-0x77 is the firmware's ESD
+ * handshake marker (this IC also idles with it, so it must be ignored), while
+ * an all-0xFD or all-0xFE window means the firmware has reset and is not
+ * scanning.  Bytes 0..5 here are the vendor's bytes 1..6: this transport
+ * already drops the two read-dummy bytes.
+ *
+ * Return: true when the report area holds the firmware-reset pattern
+ */
+static bool nt36xxx_report_is_fw_reset(const u8 *point)
+{
+	int i;
+
+	if (point[0] != 0xFD && point[0] != 0xFE)
+		return false;
+
+	for (i = 1; i < 6; i++) {
+		if (point[i] != point[0])
+			return false;
+	}
+
+	return true;
+}
+
+static void nt36xxx_sky_schedule_recover(struct nt36xxx_ts *ts, const char *why);
+
+/**
+ * nt36xxx_wait_first_report - Wait for a live report area before enabling IRQ
+ * @ts: Main driver structure
+ *
+ * The reset-state register reports ReK before the first frame is written, so
+ * poll the report area itself while the interrupt is still masked.  This is
+ * the deterministic form of the settle time that only existed accidentally in
+ * the earlier diagnostic builds.  The wait is short (20 x 5 ms) and not fatal:
+ * the runtime recovery covers an IC that is still silent afterwards.
+ */
+static void nt36xxx_wait_first_report(struct nt36xxx_ts *ts)
+{
+	u8 point[8] = { 0 };
+	int i;
+
+	for (i = 0; i < 20; i++) {
+		if (regmap_raw_read(ts->regmap, ts->mmap[MMAP_EVENT_BUF_ADDR],
+				    point, sizeof(point)))
+			return;
+		if (!nt36xxx_report_is_fw_reset(point))
+			return;
+		usleep_range(5000, 6000);
+	}
+
+	dev_info(ts->dev, "sky: report area still idle, enabling IRQ anyway\n");
 }
 
 /**
@@ -354,11 +657,20 @@ static void nt36xxx_report(struct nt36xxx_ts *ts)
 {
 	struct nt36xxx_abs_object *obj = &ts->abs_obj;
 	struct input_dev *input = ts->input;
+	unsigned int raw_x_max = ts->data->abs_x_max * NT36XXX_RAW_UNITS_PER_PX;
+	unsigned int raw_y_max = ts->data->abs_y_max * NT36XXX_RAW_UNITS_PER_PX;
 	u8 input_id = 0;
 	u8 point[POINT_DATA_LEN + 1] = { 0 };
 	unsigned int ppos = 0;
-	int i, ret, finger_cnt = 0;
-	uint8_t press_id[TOUCH_MAX_FINGER_NUM] = {0};
+	int i, ret;
+
+	/*
+	 * SPI has no arbitration: a report read that interleaves with another
+	 * user of the bus (the health poll, an init sequence) puts the page
+	 * select and the data phase out of order and can wedge the firmware.
+	 * The vendor serialises every access with this lock; so do we.
+	 */
+	mutex_lock(&ts->lock);
 
 	ret = regmap_raw_read(ts->regmap, ts->mmap[MMAP_EVENT_BUF_ADDR],
 				point, sizeof(point));
@@ -368,19 +680,37 @@ static void nt36xxx_report(struct nt36xxx_ts *ts)
 		goto xfer_error;
 	}
 
-	/* wdt recovery and esd check */
-	for (i = 0; i < 7; i++) {
-		if ((point[i] != 0xFD) && (point[i] != 0xFE) && (point[i] != 0x77)) {
-			break;
-		}
-
-		cancel_delayed_work(&ts->work);
-		schedule_delayed_work(&ts->work, 100);
-		goto xfer_error;
+	/*
+	 * A firmware that has reset keeps the interrupt line busy at the scan
+	 * rate while every report read returns 0xFE, so the driver has to
+	 * re-init the IC itself; the vendor does this after ten reads.
+	 */
+	if (nt36xxx_report_is_fw_reset(point)) {
+		if (++ts->fw_reset_cnt >= NT36XXX_FW_RESET_LIMIT)
+			nt36xxx_sky_schedule_recover(ts, "reports all 0xFD/0xFE");
+	} else {
+		ts->fw_reset_cnt = 0;
 	}
 
+	/* bounded: the first reads after every init, with the IC's own state */
+	if (ts->report_log_cnt < 3) {
+		u8 state[6] = { 0 };
+		int level = -1;
+
+		regmap_raw_read(ts->regmap,
+				ts->mmap[MMAP_EVENT_BUF_ADDR] |
+						NT36XXX_EVT_RESET_COMPLETE,
+				state, 6);
+		if (ts->irq_gpio)
+			level = gpiod_get_raw_value_cansleep(ts->irq_gpio);
+
+		dev_info(ts->dev, "sky-report[%u]: %6phN state=%6phN irq_line=%d\n",
+			 ts->report_log_cnt, point, state, level);
+	}
+	ts->report_log_cnt++;
+
 	for (i = 0; i < TOUCH_MAX_FINGER_NUM; i++) {
-		ppos = 6 * i + 1;
+		ppos = 6 * i;
 		input_id = point[ppos + 0] >> 3;
 
 		if ((input_id == 0) || (input_id > TOUCH_MAX_FINGER_NUM)) {
@@ -389,30 +719,18 @@ static void nt36xxx_report(struct nt36xxx_ts *ts)
 
 		if (((point[ppos] & 0x07) == 0x01) ||
 		    ((point[ppos] & 0x07) == 0x02)) {
-			obj->x = (point[ppos + 1] << 4) +
-				 (point[ppos + 3] >> 4);
-			obj->y = (point[ppos + 2] << 4) +
-				 (point[ppos + 3] & 0xf);
+			u16 raw_x = (point[ppos + 1] << 8) | point[ppos + 2];
+			u16 raw_y = (point[ppos + 3] << 8) | point[ppos + 4];
 
-			if ((obj->x > ts->prop.max_x) ||
-			    (obj->y > ts->prop.max_y))
-				continue;
-
-			obj->tm = point[ppos + 4];
-			if (obj->tm == 0)
-				obj->tm = 1;
+			obj->x = nt36xxx_scale_coord(raw_x, raw_x_max,
+						     ts->prop.max_x);
+			obj->y = nt36xxx_scale_coord(raw_y, raw_y_max,
+						     ts->prop.max_y);
 
 			obj->z = point[ppos + 5];
-			if (i < 2) {
-				obj->z += point[i + 63] << 8;
-				if (obj->z > TOUCH_MAX_PRESSURE)
-					obj->z = TOUCH_MAX_PRESSURE;
-			}
-
 			if (obj->z == 0)
 				obj->z = 1;
 
-			press_id[input_id - 1] = 1;
 
 			input_mt_slot(input, input_id - 1);
 			input_mt_report_slot_state(input,
@@ -421,10 +739,7 @@ static void nt36xxx_report(struct nt36xxx_ts *ts)
 						obj->x,
 						obj->y, true);
 
-			input_report_abs(input, ABS_MT_TOUCH_MAJOR, obj->tm);
 			input_report_abs(input, ABS_MT_PRESSURE, obj->z);
-
-			finger_cnt++;
 		}
 	}
 
@@ -433,7 +748,7 @@ static void nt36xxx_report(struct nt36xxx_ts *ts)
 	input_sync(input);
 
 xfer_error:
-	return;
+	mutex_unlock(&ts->lock);
 }
 
 static irqreturn_t nt36xxx_irq_handler(int irq, void *dev_id)
@@ -487,8 +802,9 @@ static int nt36xxx_chip_version_init(struct nt36xxx_ts *ts)
 		if (ret)
 			continue;
 
-		dev_info(ts->dev, "%s buf[0]=0x%02X, buf[1]=0x%02X, buf[2]=0x%02X, buf[3]=0x%02X, buf[4]=0x%02X, buf[5]=0x%02X, buf[6]=0x%02X sz=%d\n",
-			__func__, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], sz);
+		if (!ts->quiet_init)
+			dev_info(ts->dev, "%s buf[0]=0x%02X, buf[1]=0x%02X, buf[2]=0x%02X, buf[3]=0x%02X, buf[4]=0x%02X, buf[5]=0x%02X, buf[6]=0x%02X sz=%d\n",
+				__func__, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], sz);
 
 		/* Compare read chip id with trim list */
 		for (list = 0; list < sz; list++) {
@@ -664,6 +980,12 @@ static int32_t nvt_bin_header_parser(struct device *dev, int hw_crc, const u8 *f
 	return 0;
 }
 
+/* Not called: every oversized transfer poisons the GPI engine (see handoff6 §10). */
+static void __maybe_unused nt36xxx_tx_size_sweep(struct nt36xxx_ts *ts);
+
+static int nt36xxx_sky_write_part(struct nt36xxx_ts *ts, int idx);
+static void nt36xxx_sky_dump_crc(struct nt36xxx_ts *ts);
+
 static int32_t nt36xxx_download_firmware_hw_crc(struct nt36xxx_ts *ts) {
 	uint32_t list = 0;
 	uint32_t bin_addr, sram_addr, size;
@@ -672,7 +994,7 @@ static int32_t nt36xxx_download_firmware_hw_crc(struct nt36xxx_ts *ts) {
 	nt36xxx_bootloader_reset(ts);
 
 	for (list = 0; list < ts->fw_data.partition; list++) {
-		int j;
+		int j, ret;
 
 		/* initialize variable */
 		sram_addr = bin_map[list].sram_addr;
@@ -690,28 +1012,116 @@ static int32_t nt36xxx_download_firmware_hw_crc(struct nt36xxx_ts *ts) {
 
 		bin_map[list].loaded = 1;
 
-		if (size / NT36XXX_TRANSFER_LEN)
-			dev_dbg(ts->dev, "%s %d paged write [%s] 0x%x, window 0x%x, residue 0x%x",
-					__func__, __LINE__, bin_map[list].name, size,
-					NT36XXX_TRANSFER_LEN, size % NT36XXX_TRANSFER_LEN);
+		if (!ts->quiet_init)
+			dev_info(ts->dev,
+				 "sky-fw: part %u %s sram=0x%x size=0x%x chunk=0x%x\n",
+				 list, bin_map[list].name, sram_addr, size,
+				 NT36XXX_TRANSFER_LEN);
 
 		for (j = 0; j < size; j += NT36XXX_TRANSFER_LEN) {
 			int window_size = ((size - j) / NT36XXX_TRANSFER_LEN) ? NT36XXX_TRANSFER_LEN :
 						((size - j) % NT36XXX_TRANSFER_LEN);
 
-			regmap_bulk_write(ts->regmap, sram_addr + j, &ts->fw_entry.data[bin_addr + j],
-							 window_size);
+			if (!ts->quiet_init)
+				dev_info(ts->dev,
+					 "sky-fw: write off=0x%x len=%d\n", j,
+					 window_size);
+			ret = regmap_bulk_write(ts->regmap, sram_addr + j,
+						&ts->fw_entry.data[bin_addr + j],
+						window_size);
+			if (ret) {
+				dev_err(ts->dev, "sky-fw: write off=0x%x len=%d failed %d\n",
+					j, window_size, ret);
+				return ret;
+			}
 		}
 
+	}
+
+	for (list = 0; list < ts->fw_data.partition; list++) {
+		if (!ts->bin_map[list].size)
+			continue;
+		if (nt36xxx_sky_write_part(ts, list)) {
+			dev_err(ts->dev, "sky-repair: %s still damaged\n",
+				ts->bin_map[list].name);
+			return -EIO;
+		}
 	}
 
 	return 0;
 }
 
+#define SKY_BLOCK 4096
+
+/* return the number of 4 KiB blocks whose SRAM content differs from the image */
+static int nt36xxx_sky_bad_blocks(struct nt36xxx_ts *ts, int idx, u32 *bad, int maxbad)
+{
+	u32 off, size;
+	int nbad = 0;
+	u8 *buf;
+
+	if (!ts->bin_map || !ts->fw_entry.data || !ts->bin_map[idx].size)
+		return 0;
+
+	size = ts->bin_map[idx].size + 1;
+	buf = kmalloc(SKY_BLOCK, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	for (off = 0; off < size; off += SKY_BLOCK) {
+		u32 n = min((u32)SKY_BLOCK, size - off);
+
+		if (regmap_raw_read(ts->regmap, ts->bin_map[idx].sram_addr + off, buf, n)) {
+			dev_err(ts->dev, "sky-repair: %s read failed at 0x%x\n",
+				ts->bin_map[idx].name, off);
+			continue;
+		}
+		if (memcmp(buf, ts->fw_entry.data + ts->bin_map[idx].bin_addr + off, n)) {
+			if (nbad < maxbad)
+				bad[nbad] = off;
+			nbad++;
+		}
+	}
+	kfree(buf);
+	return nbad;
+}
+
+/* write one partition, then read it back and rewrite damaged blocks */
+static int nt36xxx_sky_write_part(struct nt36xxx_ts *ts, int idx)
+{
+	u32 sram = ts->bin_map[idx].sram_addr;
+	u32 bin = ts->bin_map[idx].bin_addr;
+	u32 size = ts->bin_map[idx].size + 1;
+	u32 bad[32];
+	int attempt, nbad, i, ret;
+
+	for (attempt = 0; attempt < 4; attempt++) {
+		nbad = nt36xxx_sky_bad_blocks(ts, idx, bad, ARRAY_SIZE(bad));
+		if (!ts->quiet_init)
+			dev_info(ts->dev,
+				 "sky-repair: %s round %d bad=%d/%d\n",
+				 ts->bin_map[idx].name, attempt, nbad,
+				 (size + SKY_BLOCK - 1) / SKY_BLOCK);
+		if (nbad <= 0)
+			return 0;
+		for (i = 0; i < nbad && i < (int)ARRAY_SIZE(bad); i++) {
+			u32 off = bad[i];
+			u32 n = min((u32)SKY_BLOCK, size - off);
+
+			ret = regmap_bulk_write(ts->regmap, sram + off,
+						&ts->fw_entry.data[bin + off], n);
+			if (ret) {
+				dev_err(ts->dev, "sky-repair: rewrite 0x%x failed %d\n", off, ret);
+				return ret;
+			}
+		}
+	}
+	return -EIO;
+}
+
 static void _nt36xxx_boot_download_firmware(struct nt36xxx_ts *ts) {
 	int i, ret, retry = 0;
 	size_t fw_need_write_size = 0;
-	const struct firmware *fw_entry;
 	u8 val[8 * 4] = {0};
 
 	WARN_ON(ts->hw_crc != 2);
@@ -720,29 +1130,17 @@ static void _nt36xxx_boot_download_firmware(struct nt36xxx_ts *ts) {
 	if (ts->fw_entry.data)
 		goto upload;
 
-	ret = request_firmware(&fw_entry, ts->firmware_path, ts->dev);
-	if (ret) {
-		dev_err(ts->dev, "request fw fail name=%s\n", ts->firmware_path);
+	/* The image was loaded in probe; the worker must not call
+	 * request_firmware() (see docs/handoff6 section 8). */
+	if (!ts->fw_raw) {
+		dev_err(ts->dev, "firmware not preloaded (%s)\n", ts->firmware_path);
 		goto exit;
 	}
 
-	/*
-	 * must allocate in DMA buffer otherwise fail spi tx DMA
-	 * so we need to manage our own fw struct
-	 * pm_resume need to re-upload fw for NT36675 IC
-	 *
-	 */
-	ts->fw_entry.data = devm_kmemdup(ts->dev, fw_entry->data, fw_entry->size, GFP_KERNEL | GFP_DMA);
+	ts->fw_entry.data = ts->fw_raw;
+	ts->fw_entry.size = ts->fw_raw_size;
 
-	release_firmware(fw_entry);
-
-	if (!ts->fw_entry.data) {
-		dev_err(ts->dev, "memdup fw_data fail\n");
-		goto exit;
-	}
-	ts->fw_entry.size = fw_entry->size;
-
-	WARN_ON(ts->fw_entry.data[0] != fw_entry->data[0]);
+	/* first firmware byte is 0x00 on this image; no sanity check here */
 
 	for (i = (ts->fw_entry.size / 4096); i > 0; i--) {
 		if (strncmp(&ts->fw_entry.data[i * 4096 - 3], "NVT", 3) == 0) {
@@ -793,6 +1191,7 @@ upload:
 		goto release_fw_buf;
 	}
 
+
 	/* set ilm & dlm reg bank */
 	for (i = 0; i < ts->fw_data.partition; i++) {
 		if (0 == strncmp(ts->bin_map[i].name, "ILM", 3)) {
@@ -835,10 +1234,15 @@ upload:
 	/* old logic 5ms, retention to 10ms */
 	usleep_range(10000, 11000);
 
+	nt36xxx_sky_dump_crc(ts);
+
 	/* nvt_check_fw_reset_state() */
 	ret = nt36xxx_check_reset_state(ts, NT36XXX_STATE_INIT);
-	if (ret)
+	if (ret) {
+		nt36xxx_sky_dump_crc(ts);
 		goto release_fw_buf;
+	}
+
 
 check_fw:
 	/* nvt_get_fw_info() */
@@ -846,14 +1250,38 @@ check_fw:
 	if (ret)
 		goto release_fw_buf;
 
-	dev_dbg(ts->dev, "Get default fw_ver=%d, max_x=%d, max_y=%d\n",
-				val[2], ts->prop.max_x, ts->prop.max_y);
+	dev_dbg(ts->dev, "Get fw_ver=%d, max_x=%d, max_y=%d\n",
+				val[0], ts->prop.max_x, ts->prop.max_y);
 
-	if (val[0] != 0xff && retry < 5) {
-		dev_err(ts->dev, "FW info is broken! fw_ver=0x%02X, ~fw_ver=0x%02X\n", val[1], val[2]);
-		retry++;
-		goto check_fw;
+	/*
+	 * The vendor checks fw_ver + ~fw_ver == 0xFF (buf[1]+buf[2] in its
+	 * indexing, i.e. val[0]+val[1] here).  The previous port checked only
+	 * val[0] != 0xff, which reports a valid FWINFO as broken.
+	 */
+	if ((u8)(val[0] + val[1]) != 0xff) {
+		dev_err(ts->dev, "FW info is broken! fw_ver=0x%02X, ~fw_ver=0x%02X, raw=%*phN\n",
+			val[0], val[1], 8, val);
+		if (++retry < 5)
+			goto check_fw;
+		goto release_fw_buf;
 	}
+	dev_info(ts->dev, "sky-fwinfo: fw_ver=0x%02X ~=0x%02X raw=%*phN\n",
+		 val[0], val[1], 8, val);
+
+	/*
+	 * Passing the INIT check only means the firmware was accepted, not
+	 * that it is scanning: the IC runs its ReK baseline phase next and
+	 * until that finishes the report area holds no point at all, while
+	 * GPIO13 already toggles.  The vendor waits for RESET_STATE_REK before
+	 * it unmasks the interrupt; do the same, so the first interrupt the
+	 * driver serves can actually carry a report.  A late IC is not fatal
+	 * here: the bounded runtime recovery covers that case.
+	 */
+	ret = nt36xxx_check_reset_state(ts, NT36XXX_STATE_REK);
+	if (ret)
+		dev_warn(ts->dev, "sky: IC late in reaching ReK, continuing\n");
+	else
+		nt36xxx_wait_first_report(ts);
 
 	dev_info(ts->dev, "Touch IC fw loaded ok");
 
@@ -864,7 +1292,11 @@ release_fw_buf:
 	kfree(ts->bin_map);
 	ts->bin_map = NULL;
 release_fw:
-	kfree(ts->fw_entry.data);
+	/*
+	 * fw_entry.data aliases the devm-managed fw_raw buffer (loaded in
+	 * probe); freeing it here would kfree() a pointer into the middle of a
+	 * devres allocation and corrupt the device's devres list.
+	 */
 	ts->fw_entry.data = NULL;
 	ts->fw_entry.size = 0;
 exit:
@@ -872,6 +1304,148 @@ exit:
 }
 
 /*yell*/
+/*
+ * sky: GPI-DMA transmit size probe.
+ *
+ * The QUP GPI engine completes small MEM_TO_DEV DMA TREs (the 9-byte
+ * chip-ID transfer works) but never retires the 64509-byte TRE of the
+ * firmware write, and the SPI core then times out after one second.
+ * Measure the boundary instead of guessing: write zeroes into the start of
+ * the bootloader SRAM (always overwritten by a real download) with growing
+ * lengths and stop at the first failure.
+ *
+ * The buffer is a plain DMA-capable kzalloc rather than a devres allocation,
+ * so this measurement does not depend on the driver's devres state.
+ */
+static void nt36xxx_tx_size_sweep(struct nt36xxx_ts *ts)
+{
+	static const u32 sizes[] = { 8, 9, 16, 32, 64, 128, 256, 512, 1024,
+				     2048, 4096, 8192, 16384, 32768, 64509 };
+	u8 *buf;
+	u32 i;
+
+	buf = kzalloc(sizes[ARRAY_SIZE(sizes) - 1], GFP_KERNEL | GFP_DMA);
+	if (!buf) {
+		dev_err(ts->dev, "sky-sweep: buffer allocation failed\n");
+		return;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(sizes); i++) {
+		u32 len = sizes[i];
+		int ret;
+
+		dev_info(ts->dev, "sky-sweep: try len=%u\n", len);
+		ret = regmap_bulk_write(ts->regmap, 0, buf, len);
+		dev_info(ts->dev, "sky-sweep: len=%u ret=%d\n", len, ret);
+		if (ret) {
+			dev_info(ts->dev,
+				 "sky-sweep: limit is between %u and %u bytes\n",
+				 i ? sizes[i - 1] : 0u, len);
+			break;
+		}
+	}
+
+	kfree(buf);
+}
+
+/**
+ * nt36xxx_sky_schedule_recover - Re-run the IC init after a firmware reset
+ * @ts: Main driver structure
+ * @why: Short reason, used for the log line
+ *
+ * A firmware that fell back to its reset state never presents a report again,
+ * so reading the report area alone cannot recover it: the IC has to be
+ * re-initialised.  Recovery is rate limited and bounded, otherwise a
+ * permanently dead IC would turn into the re-download livelock that the
+ * all-0xFE idle-pattern guard was introduced to stop.
+ */
+static void nt36xxx_sky_schedule_recover(struct nt36xxx_ts *ts, const char *why)
+{
+	unsigned long spacing;
+
+	if (ts->status & NT36XXX_STATUS_SUSPEND)
+		return;
+
+	/*
+	 * Five attempts two seconds apart, then one per minute for as long as
+	 * the IC stays dead: a wedged controller must not keep the bus busy,
+	 * but it also must not be abandoned, because whatever killed the
+	 * firmware (ESD, a disturbed bus) can go away on its own.
+	 */
+	if (ts->recover_tries < NT36XXX_RECOVER_LIMIT)
+		spacing = NT36XXX_RECOVER_FAST_MS;
+	else
+		spacing = NT36XXX_RECOVER_SLOW_MS;
+
+	if (ts->recover_time &&
+	    time_before(jiffies, ts->recover_time + msecs_to_jiffies(spacing)))
+		return;
+
+	ts->recover_time = jiffies;
+	ts->recover_tries++;
+	ts->fw_reset_cnt = 0;
+	ts->quiet_init = ts->recover_tries > NT36XXX_RECOVER_LIMIT;
+
+	dev_info(ts->dev, "sky-recover[%u]: %s, re-running IC init\n",
+		 ts->recover_tries, why);
+
+	ts->status &= ~NT36XXX_STATUS_DOWNLOAD_COMPLETE;
+	sky_fw_attempts = 0;
+	schedule_delayed_work(&ts->work, 0);
+}
+
+/**
+ * nt36xxx_health_work - Periodic firmware state check
+ * @work: Health work
+ *
+ * The interrupt line only fires while the IC still drives it, so a firmware
+ * that went quiet would never be noticed by the report path.  The vendor
+ * polls its ESD watchdog the same way.  Only the explicit firmware-reset
+ * markers are acted on, so an IC whose register reads anything else is never
+ * re-initialised on a guess.
+ */
+static void nt36xxx_health_work(struct work_struct *work)
+{
+	struct nt36xxx_ts *ts = container_of(work, struct nt36xxx_ts,
+					     health_work.work);
+	u8 state[6] = { 0 };
+	int ret;
+
+	/* suspended: internal_pm_resume() schedules this again */
+	if (ts->status & NT36XXX_STATUS_SUSPEND)
+		return;
+
+	if ((ts->status & NT36XXX_STATUS_DOWNLOAD_COMPLETE) && ts->mmap) {
+		mutex_lock(&ts->lock);
+		ret = regmap_raw_read(ts->regmap,
+				      ts->mmap[MMAP_EVENT_BUF_ADDR] |
+						      NT36XXX_EVT_RESET_COMPLETE,
+				      state, 6);
+		mutex_unlock(&ts->lock);
+
+		if (!ret && (state[0] == 0xFD || state[0] == 0xFE ||
+			     state[0] == 0xFF)) {
+			if (++ts->health_bad >= 2)
+				nt36xxx_sky_schedule_recover(ts,
+							     "fw state reset");
+		} else if (!ret) {
+			ts->health_bad = 0;
+
+			/* a minute of healthy state earns a fresh fast phase */
+			if (ts->recover_tries && ts->recover_time &&
+			    time_after(jiffies,
+				       ts->recover_time +
+					       msecs_to_jiffies(NT36XXX_RECOVER_SLOW_MS))) {
+				ts->recover_tries = 0;
+				ts->quiet_init = false;
+			}
+		}
+	}
+
+	schedule_delayed_work(&ts->health_work,
+			      msecs_to_jiffies(NT36XXX_HEALTH_PERIOD_MS));
+}
+
 static void nt36xxx_download_firmware(struct work_struct *work) {
 	struct nt36xxx_ts *ts = container_of(work, struct nt36xxx_ts, work.work);
 	int ret;
@@ -885,22 +1459,44 @@ static void nt36xxx_download_firmware(struct work_struct *work) {
 	/* Cancel any pending delayed work */
 	cancel_delayed_work(&ts->work);
 
-	/* Check and configure the touch screen chip after disabling interrupts */
-	ret = nt36xxx_eng_reset_idle(ts);
-	if (ret) {
-		dev_err(ts->dev, "Failed to check chip version\n");
-		goto skip;
+	mutex_lock(&ts->lock);
+
+	/*
+	 * Every attempt after the first one follows a failure, so the MCU may
+	 * be wedged: pulse the reset pin like the vendor does before a
+	 * download, otherwise the firmware never starts again.
+	 */
+	if (ts->recover_tries || sky_fw_attempts) {
+		nt36xxx_hw_reset(ts);
+	} else {
+		/* Check and configure the touch screen chip */
+		ret = nt36xxx_eng_reset_idle(ts);
+		if (ret) {
+			dev_err(ts->dev, "Failed to check chip version\n");
+			mutex_unlock(&ts->lock);
+			goto skip;
+		}
 	}
 
 	/* Set memory maps for the specific chip version */
 	ret = nt36xxx_chip_version_init(ts);
 	if (ret) {
 		dev_err(ts->dev, "Failed to check chip version\n");
+		mutex_unlock(&ts->lock);
 		goto skip;
 	}
 
 	/* Download firmware using the internal function */
 	_nt36xxx_boot_download_firmware(ts);
+
+	mutex_unlock(&ts->lock);
+
+	/* Fresh init: restart the bounded per-init diagnostics and counters */
+	if (ts->status & NT36XXX_STATUS_DOWNLOAD_COMPLETE) {
+		ts->report_log_cnt = 0;
+		ts->fw_reset_cnt = 0;
+		ts->health_bad = 0;
+	}
 
 skip:
 	/* Enable touch screen IRQ and power management runtime */
@@ -909,8 +1505,13 @@ skip:
 
 	/* If the download is not complete, reschedule the delayed work after 4000ms */
 	if (!(ts->status & NT36XXX_STATUS_DOWNLOAD_COMPLETE)) {
-		cancel_delayed_work(&ts->work);
-		schedule_delayed_work(&ts->work, 4000);
+		if (++sky_fw_attempts < 2) {
+			cancel_delayed_work(&ts->work);
+			schedule_delayed_work(&ts->work, 4000);
+		} else {
+			dev_err(ts->dev, "sky: giving up after %d attempts\n",
+				sky_fw_attempts);
+		}
 	}
 }
 
@@ -920,6 +1521,7 @@ static void nt36xxx_disable_regulators(void *data)
 
 	regulator_bulk_disable(NT36XXX_NUM_SUPPLIES, ts->supplies);
 }
+
 
 static int nt36xxx_input_dev_config(struct nt36xxx_ts *ts, const struct input_id *id)
 {
@@ -948,7 +1550,6 @@ static int nt36xxx_input_dev_config(struct nt36xxx_ts *ts, const struct input_id
 	/* Set absolute parameters for touch events */
 	input_set_abs_params(ts->input, ABS_MT_PRESSURE, 0,
 						 TOUCH_MAX_PRESSURE, 0, 0);
-	input_set_abs_params(ts->input, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
 
 	/* Set absolute parameters for touch position */
 	input_set_abs_params(ts->input, ABS_MT_POSITION_X, 0,
@@ -1091,6 +1692,34 @@ skip_regulators:
 		return ret;
 	}
 
+	/*
+	 * sky: load the firmware here, in process context, and keep a
+	 * DMA-capable copy.  Requesting it later from the download worker
+	 * crashed inside devres_find() (ts->dev->devres_head.prev == -1) and
+	 * killed the worker with IRQs disabled; see docs/handoff6 section 8.
+	 */
+	{
+		const struct firmware *fw = NULL;
+
+		ret = request_firmware(&fw, ts->firmware_path, dev);
+		if (ret) {
+			dev_err(dev, "Failed to load %s: %d\n", ts->firmware_path, ret);
+		} else {
+			ts->fw_raw = devm_kmemdup(dev, fw->data, fw->size,
+						  GFP_KERNEL | GFP_DMA);
+			if (ts->fw_raw) {
+				ts->fw_raw_size = fw->size;
+				dev_info(dev, "firmware %s loaded, %zu bytes\n",
+					 ts->firmware_path, ts->fw_raw_size);
+			}
+			release_firmware(fw);
+			if (!ts->fw_raw)
+				ret = -ENOMEM;
+		}
+	}
+	if (ret)
+		return ret;
+
 	/* Сopy the const mmap into drvdata */
 	memcpy(ts->mmap_data, ts->data->mmap, sizeof(ts->mmap_data));
 	ts->mmap = ts->mmap_data;
@@ -1109,13 +1738,20 @@ skip_regulators:
 			dev_err(dev, "request irq failed: %d\n", ret);
 			return ret;
 		}
+
+		/* what the irqchip ended up with, after the DT active-low flag */
+		dev_info(dev, "sky-irq: irq=%d trigger=0x%x\n", ts->irq,
+			 irq_get_trigger_type(ts->irq));
 	}
 
 	/* Set up delayed work for firmware download */
 	devm_delayed_work_autocancel(dev, &ts->work, nt36xxx_download_firmware);
+	devm_delayed_work_autocancel(dev, &ts->health_work, nt36xxx_health_work);
 
 	/* Schedule the delayed work */
 	schedule_delayed_work(&ts->work, 0);
+	schedule_delayed_work(&ts->health_work,
+			      msecs_to_jiffies(NT36XXX_HEALTH_PERIOD_MS));
 
 	/* If the device follows a DRM panel, configure panel follower */
 	if (drm_is_panel_follower(dev)) {
@@ -1136,11 +1772,23 @@ static int __maybe_unused nt36xxx_internal_pm_suspend(struct device *dev)
 
 	ts->status |= NT36XXX_STATUS_SUSPEND;
 
+	/* cancel before taking the lock: the worker holds it while running */
 	cancel_delayed_work_sync(&ts->work);
+	cancel_delayed_work_sync(&ts->health_work);
 
+	/*
+	 * The vendor sends the sleep command to the event buffer's HOST_CMD
+	 * byte (EVENT_BUF_ADDR | 0x50).  Writing it to EVENT_BUF_ADDR itself
+	 * hits the report area instead of the command channel.
+	 */
+	mutex_lock(&ts->lock);
 	if (ts->mmap[MMAP_EVENT_BUF_ADDR]) {
-		ret = regmap_write(ts->regmap, ts->mmap[MMAP_EVENT_BUF_ADDR], NT36XXX_CMD_ENTER_SLEEP);
+		ret = regmap_write(ts->regmap,
+				   ts->mmap[MMAP_EVENT_BUF_ADDR] |
+					   NT36XXX_EVT_HOST_CMD,
+				   NT36XXX_CMD_ENTER_SLEEP);
 	}
+	mutex_unlock(&ts->lock);
 
 	if (ret)
 		dev_err(ts->dev, "Cannot enter suspend!\n");
@@ -1170,6 +1818,10 @@ static int __maybe_unused nt36xxx_internal_pm_resume(struct device *dev)
 		schedule_delayed_work(&ts->work, 0);
 
 	ts->status &= ~NT36XXX_STATUS_SUSPEND;
+	ts->quiet_init = false;
+
+	schedule_delayed_work(&ts->health_work,
+			      msecs_to_jiffies(NT36XXX_HEALTH_PERIOD_MS));
 
 	return 0;
 }
