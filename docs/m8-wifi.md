@@ -156,6 +156,59 @@ A SNOC port therefore needs:
    `pm6450_l11` (cx-mx), `pm6450_l23` (1.8-xo), `pm6450_l14` (1.3-rfa),
    `pm8010_l7` (3.3-ch0), which is exactly what the repo DTS lists.
 
+### 2.4 The two host interfaces, in the vendor stack and upstream
+
+The WCN6750 has two host interfaces and the firmware decides which one it
+implements:
+
+| | SNOC ("adrastea") | hybrid / fake-PCI ("IPCI") |
+|---|---|---|
+| vendor DT node | `qcom,icnss@22800000` (**enabled on sky**) | `qcom,wcn6750` (**disabled on sky**) |
+| registers | `reg = <0x22800000 0x800000>`, `reg-names = "membase"`, windowed access through the same block | `reg = <…msi_addr 0x0>`, BAR reported by `QMI_WLANFW_DEVICE_INFO` |
+| interrupts | 12 GIC SPIs, one per copy engine (CE0..CE11) | 32 MSI vectors (`GIC_SPI 768..799`), MSI address in the SoC's `pcie0_msi` window |
+| IOMMU | SID `0x4c0` | SID `0x1400` |
+| QMI start sequence | `ind_register`, `msa_mem_info`, `msa_ready`, `cap`, BDF | `ind_register`, `host_cap`, `cap`, `device_info`, BDF |
+| vendor driver path | icnss2 `ADRASTEA_DEVICE_ID` | icnss2 `WCN6750_DEVICE_ID` |
+| upstream ath11k | **not implemented** | `ath11k_ahb` + `hybrid_bus_type` (`ath11k_ahb_window_{read,write}32_wcn6750`) |
+
+References for the vendor side:
+
+* `drivers/soc/qcom/icnss2/{main,qmi,power}.c` in
+  [sky-lineage/android_kernel_xiaomi_sky](https://github.com/sky-lineage/android_kernel_xiaomi_sky)
+  (branches `lineage-23.2`): `icnss_dt_match` maps `qcom,icnss` → ADRASTEA and
+  `qcom,wcn6750` → WCN6750, and the ADRASTEA branch is the one without
+  `wlfw_device_info_send_msg()`.
+* qcacld's host-interface layer for this chip:
+  `qca-wifi-host-cmn/hif/{inc/hif.h,src/snoc,src/ce,src/qca6750def.c}`
+  (`HIF_TYPE_ADRASTEA` in the 2021 tree, `HIF_TYPE_QCA6750 = 23` /
+  "fake PCI" DID `0x1105` in the 2024 tree). The
+  [librephone HIF notes](https://librephone.fsf.org/site/hif/) summarise it:
+  MMIO base and 12 per-copy-engine IRQs come from the WPSS side (not from a QMI
+  `device_info`), registers are accessed through a windowed "fake PCI" mapping,
+  and most of the QCA6750 register definitions are not needed by the host.
+
+Upstream reference for the *other* interface:
+`arch/arm64/boot/dts/qcom/milos.dtsi` (SM7635 / Fairphone 6, in mainline since
+2026) describes exactly the hybrid node —
+
+```dts
+wifi: wifi@17110040 {
+	compatible = "qcom,wcn6755-wifi", "qcom,wcn6750-wifi";
+	reg = <0x0 0x17110040 0x0 0x0>;            /* msi_addr */
+	iommus = <&apps_smmu 0x1400 0x1>;           /* v1 SID, hybrid */
+	interrupts = <0 768 … 799>;                 /* 32 MSI vectors */
+	qcom,rproc = <&remoteproc_wpss>;
+	qcom,smem-states = <&smp2p_wlan_out 0>;
+	qcom,smem-state-names = "wlan-smp2p-out";
+};
+```
+
+which is the same shape as the *disabled* `qcom,wcn6750` node in sky's vendor DT
+(`0x17210040`, `GIC_SPI 0x300..0x31f`, SID `0x1400`). So the chip is upstream
+supported — with the IPCI firmware. sky's stock `NON-HLOS.bin` ships only the
+SNOC ("adrastea") build, and `image/adrastea` is the only WLAN firmware
+directory in it.
+
 `dts/sm4450-xiaomi-sky.dts` has been updated to the SNOC-correct node
 (`membase`, 12 IRQs, SID `0x4c0`, the four `l11/l23/l14/l7` rails) plus
 `qcom,rproc` and the wlan smp2p state, i.e. the DT is ready for the port; the

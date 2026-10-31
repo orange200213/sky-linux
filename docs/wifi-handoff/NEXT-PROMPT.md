@@ -38,6 +38,9 @@ wrong).
 
 ## Do this, in order
 
+0. **Read `docs/m8-wifi.md` §2.3/§2.4 first** — the two host interfaces
+   (SNOC/"adrastea" vs hybrid/"IPCI") are tabulated there with the vendor
+   (`icnss2/qcacld`) and upstream (`milos.dtsi`) references.
 1. **Port the SNOC variant** into `drivers/net/wireless/ath/ath11k/ahb.c`:
    after `ath11k_core_pre_init()` (hw params are a *copy* in `ath11k_base`),
    when the DT asks for it, set `ab->hw_params.hybrid_bus_type = false`,
