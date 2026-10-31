@@ -156,6 +156,32 @@ A SNOC port therefore needs:
    `pm6450_l11` (cx-mx), `pm6450_l23` (1.8-xo), `pm6450_l14` (1.3-rfa),
    `pm8010_l7` (3.3-ch0), which is exactly what the repo DTS lists.
 
+### 2.5 ath10k (wcn3990) is the closest working reference for the SNOC half
+
+`drivers/net/wireless/ath/ath10k/{snoc.c,qmi.c}` (wcn3990, e.g. SDM845) is an
+integrated-SNOC WLAN of the same shape as our chip, and it already contains
+several pieces ath11k lacks:
+
+| ath10k (wcn3990, SNOC) | why it matters for sky |
+|---|---|
+| `qmi_add_lookup(..., QMI_SERVICE_ID_WLFW, WLFW_SERVICE_VERS_V01, 0)` — **instance 0** | the same encoding that this firmware registers, i.e. exactly what patch 0001 had to force into ath11k |
+| `ath10k_qmi_msa_mem_info_send_sync_msg()` → `QMI_WLFW_MSA_INFO_REQ_V01` | the ADRASTEA start sequence wants `wlfw_msa_mem_info`; ath11k has neither the message nor the structs |
+| `ath10k_qmi_msa_ready_send_sync_msg()` → `QMI_WLFW_MSA_READY_REQ_V01` | ditto for `wlfw_msa_ready` |
+| SCM call with `QCOM_SCM_VMID_MSS_MSA` / `QCOM_SCM_VMID_WLAN` before the MSA messages | gives the WLAN subsystem permission to read/write the MSA carve-out; nothing in ath11k does this |
+| `ath10k_snoc_resource_init()`: `platform_get_resource_byname(…, "membase")` → `devm_ioremap()`, then `platform_get_irq(dev, i)` for `i < CE_COUNT` (12) | the SNOC register model: direct base + 12 un-named per-CE IRQs, no MSI, no `DEVICE_INFO` |
+| `vreg_list = {"vdd-0.8-cx-mx", "vdd-1.8-xo", "vdd-1.3-rfa", "vdd-3.3-ch0", …}` | the four rails of the stock `qcom,icnss` node, driven explicitly by the driver |
+| `ath10k_snoc_wlan_enable()` (per-pipe CE config → `wlfw_wlan_mode`) | the same message ath11k sends, driven from the platform side |
+
+Differences that must stay ath11k's: the 11ax register offsets/HAL, the CE
+configuration (9 pipes for wcn6750), WMI/HTT, and — per the vendor stack — the
+*windowed* "fake PCI" register access (`ath11k_ahb_window_*_wcn6750`), which
+ath10k does not need because wcn3990 is flat mapped. The one open question is
+where the 11ax datapath ring interrupts (reo2host_status, wbm2host_rx_release,
+…) come from on this variant: the stock node has no such IRQs, so either they
+are muxed behind the CE IRQs / a MISC status register, or the port has to
+discover the vendor's dispatch (librephone notes that most `qca6750def.c`
+registers are "MISSING", i.e. not needed by the host).
+
 ### 2.4 The two host interfaces, in the vendor stack and upstream
 
 The WCN6750 has two host interfaces and the firmware decides which one it
@@ -291,12 +317,15 @@ Gotchas confirmed again on this board:
 
 ## 6. Next steps
 
-1. Port the SNOC/adrastea variant into ath11k (items 1–4 of §2.3). The cheapest
-   first experiment: keep the current source and add a DT opt-in (e.g.
-   `qcom,snoc-direct-mem`) that, after `ath11k_core_pre_init()`, sets
-   `ab->hw_params.hybrid_bus_type = false`, `hif_ops = ath11k_ahb_hif_ops_ipq8074`
-   and `pci_ops = NULL`; `ab->hw_params` is a struct copy in `ath11k_base`, so
-   it can be overridden per device.
+1. Port the SNOC/adrastea variant into ath11k (items 1–4 of §2.3), borrowing
+   from `ath10k/{snoc.c,qmi.c}` where possible (§2.5). The cheapest first
+   experiment: keep the current source and add a DT opt-in (e.g.
+   `qcom,snoc-ahb`) that, after `ath11k_core_pre_init()`, sets
+   `ab->hw_params.hybrid_bus_type = false` and `pci_ops = NULL` (keeping the
+   wcn6750 window ops for the register access), then take `ab->mem` from the
+   `membase` resource and request the CE IRQs by index like ath10k does;
+   `ab->hw_params` is a struct copy in `ath11k_base`, so it can be overridden
+   per device.
 2. Resolve the 12 unnamed interrupts for the non-hybrid path
    (`platform_get_irq_byname()`), most likely by comparing with the vendor's
    `icnss2` irq indices.
