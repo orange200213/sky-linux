@@ -241,6 +241,34 @@ directory in it.
 DTB currently flashed on the phone is the *hybrid* one used to get the QMI
 diagnosis.
 
+### 2.6 Phase 1 implementation (kernel `#63`, boot image `…-k63-snoc.img`)
+
+`kernel/patches-m8/0003` adds a DT-gated SNOC mode to `ath11k_ahb`:
+
+```
+qcom,snoc-ahb;                 /* in the wifi node */
+```
+* `ath11k_ahb_probe()` sets `ab->hw_params.hybrid_bus_type = false` right after
+  `ath11k_core_pre_init()`, which makes `ath11k_ahb_setup_resources()` ioremap
+  the DT `membase` (0x22800000) and turns `ath11k_qmi_request_device_info()`
+  into a no-op; the wcn6750 windowed register ops stay in use
+  (`ath11k_ahb_window_{read,write}32_wcn6750`, window register at BAR+0x310c).
+* `ath11k_ahb_config_irq()` requests the copy-engine interrupts **by index**
+  (`platform_get_irq()`, like `ath10k/snoc.c`) instead of by name, and skips
+  the extended interrupts (this variant's DT has no such IRQs — open issue,
+  see §2.5).
+* `ath11k_qmi_event_server_arrive()` sends `msa_mem_info` + `msa_ready` right
+  after `ind_register` when the property is present: the MSA range comes from
+  `memory-region` (the `wlan_msa_mem` carve-out, 0x82a00000+3 MiB), and
+  `qcom,msa-fixed-perm` (already in the node) means the TZ keeps the
+  permissions, so no `qcom_scm_assign_mem()` call is needed.
+
+The matching DTB is `wifi-backup/wifi-snoc-fdt.dtb` (built from the live DT by
+`wifi-backup/patch-fdt-snoc.py`): the stock SNOC node (membase, 12 per-CE IRQs,
+SID 0x4c0, four rails) plus `qcom,rproc`, the wlan smp2p state,
+`qcom,snoc-ahb` and `status = "okay"`, with the four rails marked
+`regulator-always-on` (ath11k never touches regulators).
+
 ## 3. What is installed on the device
 
 | Path | Content | Backup |

@@ -1,0 +1,379 @@
+From: sky-linux M8 bring-up
+Subject: [PATCH 3/3] wifi: ath11k: add SNOC (icnss) mode for the WCN6750 variant
+
+The stock firmware of this board implements only the SNOC host interface
+(qcom,icnss node: registers at "membase", one GIC interrupt per copy engine,
+no MSI, no QMI DEVICE_INFO), while upstream ath11k implements the hybrid/
+IPCI variant. With a DT opt-in ("qcom,snoc-ahb") the driver now:
+
+  * keeps the wcn6750 windowed register access but takes ab->mem from the DT
+    "membase" resource instead of the QMI DEVICE_INFO BAR (hybrid_bus_type
+    off, so ath11k_qmi_request_device_info() is a no-op),
+  * requests the copy-engine interrupts by index like ath10k/snoc.c does,
+  * sends the WLFW MSA handshake (msa_mem_info + msa_ready, message ids and
+    element tables taken from ath10k/qmi_wlfw_v01.[ch]) before the target
+    cap / BDF download, which is what the icnss/ADRASTEA start sequence does.
+
+Extended interrupts are not configured yet: the SNOC variant does not
+describe them in its DT.
+---
+
+diff --git a/drivers/net/wireless/ath/ath11k/ahb.c b/drivers/net/wireless/ath/ath11k/ahb.c
+index ec5bf5c9f..b68716227 100644
+--- a/drivers/net/wireless/ath/ath11k/ahb.c
++++ b/drivers/net/wireless/ath/ath11k/ahb.c
+@@ -632,6 +632,7 @@ static int ath11k_ahb_config_ext_irq(struct ath11k_base *ab)
+ 
+ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
+ {
++	struct ath11k_ahb *ab_ahb = ath11k_ahb_priv(ab);
+ 	int irq, irq_idx, i;
+ 	int ret;
+ 
+@@ -648,7 +649,16 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
+ 		irq_idx = ATH11K_IRQ_CE0_OFFSET + i;
+ 
+ 		tasklet_setup(&ce_pipe->intr_tq, ath11k_ahb_ce_tasklet);
+-		irq = platform_get_irq_byname(ab->pdev, irq_name[irq_idx]);
++		if (ab_ahb->snoc_ahb)
++			irq = platform_get_irq(ab->pdev, i);
++		else
++			irq = platform_get_irq_byname(ab->pdev, irq_name[irq_idx]);
++		if (irq < 0) {
++			ath11k_err(ab, "failed to get irq for ce %d: %d\n",
++				   i, irq);
++			ath11k_ahb_free_ce_irqs(ab, i);
++			return irq;
++		}
+ 		ret = request_irq(irq, ath11k_ahb_ce_interrupt_handler,
+ 				  IRQF_TRIGGER_RISING, irq_name[irq_idx],
+ 				  ce_pipe);
+@@ -661,6 +671,15 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
+ 		ab->irq_num[irq_idx] = irq;
+ 	}
+ 
++	/* The SNOC variant has no separate extended interrupts: the datapath
++	 * ring interrupts are not described in its DT. Leave them unconfigured
++	 * for now so that the bootstrap (MSA, BDF, WMI) can be tested.
++	 */
++	if (ab_ahb->snoc_ahb) {
++		ath11k_warn(ab, "snoc mode: extended interrupts not configured\n");
++		return 0;
++	}
++
+ 	/* Configure external interrupts */
+ 	ret = ath11k_ahb_config_ext_irq(ab);
+ 	if (ret) {
+@@ -1191,6 +1210,17 @@ static int ath11k_ahb_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		goto err_core_free;
+ 
++	/* The SNOC ("icnss") firmware variant has no QMI DEVICE_INFO/BAR and no
++	 * MSI vectors: the register block is the DT "membase" and every copy
++	 * engine has its own GIC interrupt. Everything else (windowed register
++	 * access, QMI/WMI/HTT) is unchanged.
++	 */
++	if (of_property_present(pdev->dev.of_node, "qcom,snoc-ahb")) {
++		ath11k_info(ab, "snoc mode: membase registers, per-CE interrupts\n");
++		ath11k_ahb_priv(ab)->snoc_ahb = true;
++		ab->hw_params.hybrid_bus_type = false;
++	}
++
+ 	ret = ath11k_ahb_setup_resources(ab);
+ 	if (ret)
+ 		goto err_core_free;
+diff --git a/drivers/net/wireless/ath/ath11k/ahb.h b/drivers/net/wireless/ath/ath11k/ahb.h
+index 8c1eb1e8e..e48807bbe 100644
+--- a/drivers/net/wireless/ath/ath11k/ahb.h
++++ b/drivers/net/wireless/ath/ath11k/ahb.h
+@@ -37,6 +37,10 @@ struct ath11k_ahb {
+ 		unsigned int smem_bit;
+ 		struct qcom_smem_state *smem_state;
+ 	} smp2p_info;
++	/* SNOC/icnss variant: registers from the DT "membase", one GIC
++	 * interrupt per copy engine instead of the hybrid BAR/MSI scheme.
++	 */
++	bool snoc_ahb;
+ };
+ 
+ static inline struct ath11k_ahb *ath11k_ahb_priv(struct ath11k_base *ab)
+diff --git a/drivers/net/wireless/ath/ath11k/qmi.c b/drivers/net/wireless/ath/ath11k/qmi.c
+index 7dc07339b..ba2212c74 100644
+--- a/drivers/net/wireless/ath/ath11k/qmi.c
++++ b/drivers/net/wireless/ath/ath11k/qmi.c
+@@ -1705,6 +1705,206 @@ static const struct qmi_elem_info qmi_wlfw_fw_init_done_ind_msg_v01_ei[] = {
+ 	},
+ };
+ 
++static const struct qmi_elem_info wlfw_memory_region_info_s_v01_ei[] = {
++	{
++		.data_type      = QMI_UNSIGNED_8_BYTE,
++		.elem_len       = 1,
++		.elem_size      = sizeof(u64),
++		.array_type     = NO_ARRAY,
++		.tlv_type       = 0,
++		.offset         = offsetof(struct wlfw_memory_region_info_s_v01,
++					   region_addr),
++	},
++	{
++		.data_type      = QMI_UNSIGNED_4_BYTE,
++		.elem_len       = 1,
++		.elem_size      = sizeof(u32),
++		.array_type     = NO_ARRAY,
++		.tlv_type       = 0,
++		.offset         = offsetof(struct wlfw_memory_region_info_s_v01,
++					   size),
++	},
++	{
++		.data_type      = QMI_UNSIGNED_1_BYTE,
++		.elem_len       = 1,
++		.elem_size      = sizeof(u8),
++		.array_type     = NO_ARRAY,
++		.tlv_type       = 0,
++		.offset         = offsetof(struct wlfw_memory_region_info_s_v01,
++					   secure_flag),
++	},
++	{}
++};
++
++static const struct qmi_elem_info wlfw_msa_info_req_msg_v01_ei[] = {
++	{
++		.data_type      = QMI_UNSIGNED_8_BYTE,
++		.elem_len       = 1,
++		.elem_size      = sizeof(u64),
++		.array_type     = NO_ARRAY,
++		.tlv_type       = 0x01,
++		.offset         = offsetof(struct wlfw_msa_info_req_msg_v01,
++					   msa_addr),
++	},
++	{
++		.data_type      = QMI_UNSIGNED_4_BYTE,
++		.elem_len       = 1,
++		.elem_size      = sizeof(u32),
++		.array_type     = NO_ARRAY,
++		.tlv_type       = 0x02,
++		.offset         = offsetof(struct wlfw_msa_info_req_msg_v01,
++					   size),
++	},
++	{}
++};
++
++static const struct qmi_elem_info wlfw_msa_info_resp_msg_v01_ei[] = {
++	{
++		.data_type      = QMI_STRUCT,
++		.elem_len       = 1,
++		.elem_size      = sizeof(struct qmi_response_type_v01),
++		.array_type     = NO_ARRAY,
++		.tlv_type       = 0x02,
++		.offset         = offsetof(struct wlfw_msa_info_resp_msg_v01,
++					   resp),
++		.ei_array      = qmi_response_type_v01_ei,
++	},
++	{
++		.data_type      = QMI_DATA_LEN,
++		.elem_len       = 1,
++		.elem_size      = sizeof(u8),
++		.array_type     = NO_ARRAY,
++		.tlv_type       = 0x03,
++		.offset         = offsetof(struct wlfw_msa_info_resp_msg_v01,
++					   mem_region_info_len),
++	},
++	{
++		.data_type      = QMI_STRUCT,
++		.elem_len       = QMI_WLFW_MAX_MEM_REG_V01,
++		.elem_size      = sizeof(struct wlfw_memory_region_info_s_v01),
++		.array_type     = VAR_LEN_ARRAY,
++		.tlv_type       = 0x03,
++		.offset         = offsetof(struct wlfw_msa_info_resp_msg_v01,
++					   mem_region_info),
++		.ei_array      = wlfw_memory_region_info_s_v01_ei,
++	},
++	{}
++};
++
++static const struct qmi_elem_info wlfw_msa_ready_req_msg_v01_ei[] = {
++	{}
++};
++
++static const struct qmi_elem_info wlfw_msa_ready_resp_msg_v01_ei[] = {
++	{
++		.data_type      = QMI_STRUCT,
++		.elem_len       = 1,
++		.elem_size      = sizeof(struct qmi_response_type_v01),
++		.array_type     = NO_ARRAY,
++		.tlv_type       = 0x02,
++		.offset         = offsetof(struct wlfw_msa_ready_resp_msg_v01,
++					   resp),
++		.ei_array      = qmi_response_type_v01_ei,
++	},
++	{}
++};
++
++/* The SNOC ("icnss") variant of this firmware takes its register base and its
++ * copy-engine interrupts from the platform device instead of the hybrid
++ * DEVICE_INFO/MSI scheme, so it is selected by a DT property.
++ */
++static bool ath11k_qmi_is_snoc(struct ath11k_base *ab)
++{
++	return of_property_present(ab->dev->of_node, "qcom,snoc-ahb");
++}
++
++static int ath11k_qmi_msa_info_send(struct ath11k_base *ab)
++{
++	struct wlfw_msa_info_req_msg_v01 req = {};
++	struct wlfw_msa_info_resp_msg_v01 resp = {};
++	struct resource res = {};
++	struct qmi_txn txn;
++	int i, ret;
++
++	ret = of_reserved_mem_region_to_resource(ab->dev->of_node, 0, &res);
++	if (ret) {
++		ath11k_warn(ab, "no MSA reserved memory region: %d\n", ret);
++		return ret;
++	}
++
++	req.msa_addr = res.start;
++	req.size = resource_size(&res);
++
++	ret = qmi_txn_init(&ab->qmi.handle, &txn,
++			   wlfw_msa_info_resp_msg_v01_ei, &resp);
++	if (ret < 0)
++		return ret;
++
++	ret = qmi_send_request(&ab->qmi.handle, NULL, &txn,
++			       QMI_WLFW_MSA_INFO_REQ_V01,
++			       QMI_WLFW_MSA_INFO_REQ_MSG_V01_MAX_LEN,
++			       wlfw_msa_info_req_msg_v01_ei, &req);
++	if (ret < 0) {
++		qmi_txn_cancel(&txn);
++		return ret;
++	}
++
++	ret = qmi_txn_wait(&txn, msecs_to_jiffies(ATH11K_QMI_WLANFW_TIMEOUT_MS));
++	if (ret < 0)
++		return ret;
++
++	if (resp.resp.result != QMI_RESULT_SUCCESS_V01) {
++		ath11k_warn(ab, "msa info request rejected: %d %d\n",
++			    resp.resp.result, resp.resp.error);
++		return -EINVAL;
++	}
++
++	ath11k_info(ab, "msa 0x%llx+0x%x, %u region(s)\n",
++		    (u64)req.msa_addr, req.size, resp.mem_region_info_len);
++
++	for (i = 0; i < resp.mem_region_info_len && i < QMI_WLFW_MAX_MEM_REG_V01; i++)
++		ath11k_dbg(ab, ATH11K_DBG_QMI, "msa region %d: 0x%llx+0x%x sec %u\n",
++			   i, resp.mem_region_info[i].region_addr,
++			   resp.mem_region_info[i].size,
++			   resp.mem_region_info[i].secure_flag);
++
++	return 0;
++}
++
++static int ath11k_qmi_msa_ready_send(struct ath11k_base *ab)
++{
++	struct wlfw_msa_ready_resp_msg_v01 resp = {};
++	struct wlfw_msa_ready_req_msg_v01 req = {};
++	struct qmi_txn txn;
++	int ret;
++
++	ret = qmi_txn_init(&ab->qmi.handle, &txn,
++			   wlfw_msa_ready_resp_msg_v01_ei, &resp);
++	if (ret < 0)
++		return ret;
++
++	ret = qmi_send_request(&ab->qmi.handle, NULL, &txn,
++			       QMI_WLFW_MSA_READY_REQ_V01,
++			       QMI_WLFW_MSA_READY_REQ_MSG_V01_MAX_LEN,
++			       wlfw_msa_ready_req_msg_v01_ei, &req);
++	if (ret < 0) {
++		qmi_txn_cancel(&txn);
++		return ret;
++	}
++
++	ret = qmi_txn_wait(&txn, msecs_to_jiffies(ATH11K_QMI_WLANFW_TIMEOUT_MS));
++	if (ret < 0)
++		return ret;
++
++	if (resp.resp.result != QMI_RESULT_SUCCESS_V01) {
++		ath11k_warn(ab, "msa ready request rejected: %d %d\n",
++			    resp.resp.result, resp.resp.error);
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
+ /* clang stack usage explodes if this is inlined */
+ static noinline_for_stack
+ int ath11k_qmi_host_cap_send(struct ath11k_base *ab)
+@@ -3000,6 +3200,20 @@ static int ath11k_qmi_event_server_arrive(struct ath11k_qmi *qmi)
+ 		return ret;
+ 	}
+ 
++	if (ath11k_qmi_is_snoc(ab)) {
++		ret = ath11k_qmi_msa_info_send(ab);
++		if (ret < 0) {
++			ath11k_warn(ab, "failed to send qmi msa info: %d\n", ret);
++			return ret;
++		}
++
++		ret = ath11k_qmi_msa_ready_send(ab);
++		if (ret < 0) {
++			ath11k_warn(ab, "failed to send qmi msa ready: %d\n", ret);
++			return ret;
++		}
++	}
++
+ 	ret = ath11k_qmi_host_cap_send(ab);
+ 	if (ret < 0) {
+ 		ath11k_warn(ab, "failed to send qmi host cap: %d\n", ret);
+diff --git a/drivers/net/wireless/ath/ath11k/qmi.h b/drivers/net/wireless/ath/ath11k/qmi.h
+index 350816c81..fff10aa28 100644
+--- a/drivers/net/wireless/ath/ath11k/qmi.h
++++ b/drivers/net/wireless/ath/ath11k/qmi.h
+@@ -514,6 +514,43 @@ struct qmi_wlanfw_wlan_ini_resp_msg_v01 {
+ 	struct qmi_response_type_v01 resp;
+ };
+ 
++/* WLFW MSA handshake. Same WLFW service as the messages above, definitions
++ * taken from ath10k's qmi_wlfw_v01.[ch]. The SNOC ("icnss") variant of the
++ * WCN6750 firmware wants the host to announce the MSA carve-out and then
++ * confirm it is ready before the target CAP / BDF download - upstream ath11k
++ * (hybrid/IPCI variant only) never sends these.
++ */
++#define QMI_WLFW_MAX_MEM_REG_V01			2
++#define QMI_WLFW_MSA_INFO_REQ_V01			0x002D
++#define QMI_WLFW_MSA_INFO_REQ_MSG_V01_MAX_LEN		18
++#define QMI_WLFW_MSA_READY_REQ_V01			0x002E
++#define QMI_WLFW_MSA_READY_REQ_MSG_V01_MAX_LEN		0
++
++struct wlfw_memory_region_info_s_v01 {
++	u64 region_addr;
++	u32 size;
++	u8 secure_flag;
++} __packed;
++
++struct wlfw_msa_info_req_msg_v01 {
++	u64 msa_addr;
++	u32 size;
++} __packed;
++
++struct wlfw_msa_info_resp_msg_v01 {
++	struct qmi_response_type_v01 resp;
++	u32 mem_region_info_len;
++	struct wlfw_memory_region_info_s_v01 mem_region_info[QMI_WLFW_MAX_MEM_REG_V01];
++};
++
++struct wlfw_msa_ready_req_msg_v01 {
++	char placeholder;
++} __packed;
++
++struct wlfw_msa_ready_resp_msg_v01 {
++	struct qmi_response_type_v01 resp;
++};
++
+ int ath11k_qmi_firmware_start(struct ath11k_base *ab,
+ 			      u32 mode);
+ void ath11k_qmi_firmware_stop(struct ath11k_base *ab);

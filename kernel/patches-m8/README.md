@@ -8,6 +8,7 @@ Two patches on top of the M7 tree (`sky-mainline/kernel/linux-7.3`,
 |---|---|
 | `0001-ath11k-wcn6750-wlfw-qmi-instance0.patch` | the wcn6750 hw params ask for WLFW QMI instance 0 instead of upstream's 3 — this board's stock firmware registers `version \| instance << 8 == 0x0001`, upstream looks for `0x0301` and never finds it |
 | `0002-ath11k-ahb-remove-without-registered.patch` | backport of upstream `1a7bcf5324c8`; without it, unbinding a stalled wcn6750 panics in `ath11k_ce_cleanup_pipes()` |
+| `0003-ath11k-wcn6750-snoc-mode.patch` | `qcom,snoc-ahb` opt-in: membase registers instead of the QMI `DEVICE_INFO` BAR, per-copy-engine GIC interrupts instead of MSI, and the WLFW MSA handshake (`msa_mem_info` + `msa_ready`, ported from ath10k) before cap/BDF |
 
 Apply:
 
