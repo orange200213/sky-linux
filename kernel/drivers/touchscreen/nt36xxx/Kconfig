@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config TOUCHSCREEN_NT36XXX_ML
+	tristate "Novatek NT36XXX touchscreen (mainline port, regmap)"
+	depends on SPI
+	help
+	  Novatek NT36XXX SPI touchscreen driver from the sm7150-mainline tree.
+	  It talks through regmap, so transfers are split at the controller's
+	  advertised maximum instead of sending one large buffer.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called nt36xxx-ml.

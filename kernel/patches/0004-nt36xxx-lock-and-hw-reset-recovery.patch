@@ -1,0 +1,310 @@
+--- build/archives/handoff12-touch-working-20261031/source/nt36xxx_core.c	2026-11-01 06:53:23.797562478 +0900
++++ kernel/linux-7.3/drivers/input/touchscreen/nt36xxx-ml/nt36xxx_core.c	2026-11-01 07:09:17.621187198 +0900
+@@ -82,6 +82,8 @@
+ /* Bounded firmware re-init: the vendor WDT recovery threshold and a cap. */
+ #define NT36XXX_FW_RESET_LIMIT	10
+ #define NT36XXX_RECOVER_LIMIT	5
++#define NT36XXX_RECOVER_FAST_MS	2000
++#define NT36XXX_RECOVER_SLOW_MS	60000
+ #define NT36XXX_HEALTH_PERIOD_MS 2000
+ 
+ static int sky_fw_attempts;
+@@ -118,6 +120,7 @@
+ 	unsigned long recover_time;
+ 	unsigned int health_bad;
+ 	unsigned int report_log_cnt;
++	bool quiet_init;
+ 
+ 	/* this is a duplicate with nt36xxx_chip_data and since the address might
+ 	 * change in boot/init/download stages so make it a copy of initial map and
+@@ -341,6 +344,35 @@
+ }
+ 
+ /**
++ * nt36xxx_hw_reset - Pulse the touch controller's reset pin
++ * @ts: Main driver structure
++ *
++ * Port of the vendor recovery step (nt36xxx_fw_update.c,
++ * nvt_download_firmware_hw_crc): hold TP_RST asserted while the engineering
++ * reset command is sent, then release it and wait tRT2BRST before the
++ * bootloader reset.  A firmware that crashed cannot be recovered by software
++ * alone - the MCU stays wedged until this pin is pulsed, which is exactly why
++ * only a reboot restored touch before.
++ */
++static void nt36xxx_hw_reset(struct nt36xxx_ts *ts)
++{
++	if (!ts->reset_gpio)
++		return;
++
++	/* reset-gpios is GPIO_ACTIVE_LOW: logical 1 asserts TP_RST */
++	gpiod_set_value_cansleep(ts->reset_gpio, 1);
++	mdelay(1);
++
++	/* the MCU samples the engineering reset while TP_RST is held */
++	nt36xxx_eng_reset_idle(ts);
++
++	gpiod_set_value_cansleep(ts->reset_gpio, 0);
++	msleep(10);
++
++	dev_info(ts->dev, "sky-recover: TP_RST pulsed\n");
++}
++
++/**
+  * nt36xxx_bootloader_reset - Reset MCU to bootloader
+  * @ts: Main driver structure
+  *
+@@ -478,7 +510,8 @@
+ {
+ 	u8 flag = 0;
+ 
+-	if (!ts->bin_map)
++	/* repeated recovery attempts must not flood the ring buffer */
++	if (!ts->bin_map || ts->quiet_init)
+ 		return;
+ 
+ 	regmap_raw_read(ts->regmap, ts->mmap[MMAP_BLD_ILM_DLM_CRC_ADDR], &flag, 1);
+@@ -524,7 +557,7 @@
+ 			ret = 0;
+ 			break;
+ 		}
+-		if (buf[0] != last || buf[1] != last2) {
++		if (!ts->quiet_init && (buf[0] != last || buf[1] != last2)) {
+ 			dev_info(ts->dev, "sky-state: raw=%*phN (ret=%d, poll %d)\n",
+ 				 6, buf, ret, NT36XXX_MAX_FW_RST_RETRY - retry);
+ 			last = buf[0];
+@@ -631,6 +664,14 @@
+ 	unsigned int ppos = 0;
+ 	int i, ret;
+ 
++	/*
++	 * SPI has no arbitration: a report read that interleaves with another
++	 * user of the bus (the health poll, an init sequence) puts the page
++	 * select and the data phase out of order and can wedge the firmware.
++	 * The vendor serialises every access with this lock; so do we.
++	 */
++	mutex_lock(&ts->lock);
++
+ 	ret = regmap_raw_read(ts->regmap, ts->mmap[MMAP_EVENT_BUF_ADDR],
+ 				point, sizeof(point));
+ 	if (ret < 0) {
+@@ -707,7 +748,7 @@
+ 	input_sync(input);
+ 
+ xfer_error:
+-	return;
++	mutex_unlock(&ts->lock);
+ }
+ 
+ static irqreturn_t nt36xxx_irq_handler(int irq, void *dev_id)
+@@ -761,8 +802,9 @@
+ 		if (ret)
+ 			continue;
+ 
+-		dev_info(ts->dev, "%s buf[0]=0x%02X, buf[1]=0x%02X, buf[2]=0x%02X, buf[3]=0x%02X, buf[4]=0x%02X, buf[5]=0x%02X, buf[6]=0x%02X sz=%d\n",
+-			__func__, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], sz);
++		if (!ts->quiet_init)
++			dev_info(ts->dev, "%s buf[0]=0x%02X, buf[1]=0x%02X, buf[2]=0x%02X, buf[3]=0x%02X, buf[4]=0x%02X, buf[5]=0x%02X, buf[6]=0x%02X sz=%d\n",
++				__func__, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], sz);
+ 
+ 		/* Compare read chip id with trim list */
+ 		for (list = 0; list < sz; list++) {
+@@ -970,14 +1012,20 @@
+ 
+ 		bin_map[list].loaded = 1;
+ 
+-		dev_info(ts->dev, "sky-fw: part %u %s sram=0x%x size=0x%x chunk=0x%x\n",
+-			 list, bin_map[list].name, sram_addr, size, NT36XXX_TRANSFER_LEN);
++		if (!ts->quiet_init)
++			dev_info(ts->dev,
++				 "sky-fw: part %u %s sram=0x%x size=0x%x chunk=0x%x\n",
++				 list, bin_map[list].name, sram_addr, size,
++				 NT36XXX_TRANSFER_LEN);
+ 
+ 		for (j = 0; j < size; j += NT36XXX_TRANSFER_LEN) {
+ 			int window_size = ((size - j) / NT36XXX_TRANSFER_LEN) ? NT36XXX_TRANSFER_LEN :
+ 						((size - j) % NT36XXX_TRANSFER_LEN);
+ 
+-			dev_info(ts->dev, "sky-fw: write off=0x%x len=%d\n", j, window_size);
++			if (!ts->quiet_init)
++				dev_info(ts->dev,
++					 "sky-fw: write off=0x%x len=%d\n", j,
++					 window_size);
+ 			ret = regmap_bulk_write(ts->regmap, sram_addr + j,
+ 						&ts->fw_entry.data[bin_addr + j],
+ 						window_size);
+@@ -1049,9 +1097,11 @@
+ 
+ 	for (attempt = 0; attempt < 4; attempt++) {
+ 		nbad = nt36xxx_sky_bad_blocks(ts, idx, bad, ARRAY_SIZE(bad));
+-		dev_info(ts->dev, "sky-repair: %s round %d bad=%d/%d\n",
+-			 ts->bin_map[idx].name, attempt, nbad,
+-			 (size + SKY_BLOCK - 1) / SKY_BLOCK);
++		if (!ts->quiet_init)
++			dev_info(ts->dev,
++				 "sky-repair: %s round %d bad=%d/%d\n",
++				 ts->bin_map[idx].name, attempt, nbad,
++				 (size + SKY_BLOCK - 1) / SKY_BLOCK);
+ 		if (nbad <= 0)
+ 			return 0;
+ 		for (i = 0; i < nbad && i < (int)ARRAY_SIZE(bad); i++) {
+@@ -1311,27 +1361,30 @@
+  */
+ static void nt36xxx_sky_schedule_recover(struct nt36xxx_ts *ts, const char *why)
+ {
++	unsigned long spacing;
++
+ 	if (ts->status & NT36XXX_STATUS_SUSPEND)
+ 		return;
+ 
+-	if (ts->recover_tries >= NT36XXX_RECOVER_LIMIT) {
+-		if (ts->recover_tries == NT36XXX_RECOVER_LIMIT) {
+-			dev_err(ts->dev,
+-				"sky-recover: giving up after %u re-inits\n",
+-				ts->recover_tries);
+-			ts->recover_tries++;
+-		}
+-		return;
+-	}
++	/*
++	 * Five attempts two seconds apart, then one per minute for as long as
++	 * the IC stays dead: a wedged controller must not keep the bus busy,
++	 * but it also must not be abandoned, because whatever killed the
++	 * firmware (ESD, a disturbed bus) can go away on its own.
++	 */
++	if (ts->recover_tries < NT36XXX_RECOVER_LIMIT)
++		spacing = NT36XXX_RECOVER_FAST_MS;
++	else
++		spacing = NT36XXX_RECOVER_SLOW_MS;
+ 
+-	/* one attempt per two seconds, so a bad IC cannot hog the SPI bus */
+ 	if (ts->recover_time &&
+-	    time_before(jiffies, ts->recover_time + msecs_to_jiffies(2000)))
++	    time_before(jiffies, ts->recover_time + msecs_to_jiffies(spacing)))
+ 		return;
+ 
+ 	ts->recover_time = jiffies;
+ 	ts->recover_tries++;
+ 	ts->fw_reset_cnt = 0;
++	ts->quiet_init = ts->recover_tries > NT36XXX_RECOVER_LIMIT;
+ 
+ 	dev_info(ts->dev, "sky-recover[%u]: %s, re-running IC init\n",
+ 		 ts->recover_tries, why);
+@@ -1356,22 +1409,36 @@
+ 	struct nt36xxx_ts *ts = container_of(work, struct nt36xxx_ts,
+ 					     health_work.work);
+ 	u8 state[6] = { 0 };
++	int ret;
+ 
+ 	/* suspended: internal_pm_resume() schedules this again */
+ 	if (ts->status & NT36XXX_STATUS_SUSPEND)
+ 		return;
+ 
+-	if ((ts->status & NT36XXX_STATUS_DOWNLOAD_COMPLETE) && ts->mmap &&
+-	    !regmap_raw_read(ts->regmap,
+-			     ts->mmap[MMAP_EVENT_BUF_ADDR] |
+-					     NT36XXX_EVT_RESET_COMPLETE,
+-			     state, 6)) {
+-		if (state[0] == 0xFD || state[0] == 0xFE || state[0] == 0xFF) {
++	if ((ts->status & NT36XXX_STATUS_DOWNLOAD_COMPLETE) && ts->mmap) {
++		mutex_lock(&ts->lock);
++		ret = regmap_raw_read(ts->regmap,
++				      ts->mmap[MMAP_EVENT_BUF_ADDR] |
++						      NT36XXX_EVT_RESET_COMPLETE,
++				      state, 6);
++		mutex_unlock(&ts->lock);
++
++		if (!ret && (state[0] == 0xFD || state[0] == 0xFE ||
++			     state[0] == 0xFF)) {
+ 			if (++ts->health_bad >= 2)
+ 				nt36xxx_sky_schedule_recover(ts,
+ 							     "fw state reset");
+-		} else {
++		} else if (!ret) {
+ 			ts->health_bad = 0;
++
++			/* a minute of healthy state earns a fresh fast phase */
++			if (ts->recover_tries && ts->recover_time &&
++			    time_after(jiffies,
++				       ts->recover_time +
++					       msecs_to_jiffies(NT36XXX_RECOVER_SLOW_MS))) {
++				ts->recover_tries = 0;
++				ts->quiet_init = false;
++			}
+ 		}
+ 	}
+ 
+@@ -1392,23 +1459,38 @@
+ 	/* Cancel any pending delayed work */
+ 	cancel_delayed_work(&ts->work);
+ 
+-	/* Check and configure the touch screen chip after disabling interrupts */
+-	ret = nt36xxx_eng_reset_idle(ts);
+-	if (ret) {
+-		dev_err(ts->dev, "Failed to check chip version\n");
+-		goto skip;
++	mutex_lock(&ts->lock);
++
++	/*
++	 * Every attempt after the first one follows a failure, so the MCU may
++	 * be wedged: pulse the reset pin like the vendor does before a
++	 * download, otherwise the firmware never starts again.
++	 */
++	if (ts->recover_tries || sky_fw_attempts) {
++		nt36xxx_hw_reset(ts);
++	} else {
++		/* Check and configure the touch screen chip */
++		ret = nt36xxx_eng_reset_idle(ts);
++		if (ret) {
++			dev_err(ts->dev, "Failed to check chip version\n");
++			mutex_unlock(&ts->lock);
++			goto skip;
++		}
+ 	}
+ 
+ 	/* Set memory maps for the specific chip version */
+ 	ret = nt36xxx_chip_version_init(ts);
+ 	if (ret) {
+ 		dev_err(ts->dev, "Failed to check chip version\n");
++		mutex_unlock(&ts->lock);
+ 		goto skip;
+ 	}
+ 
+ 	/* Download firmware using the internal function */
+ 	_nt36xxx_boot_download_firmware(ts);
+ 
++	mutex_unlock(&ts->lock);
++
+ 	/* Fresh init: restart the bounded per-init diagnostics and counters */
+ 	if (ts->status & NT36XXX_STATUS_DOWNLOAD_COMPLETE) {
+ 		ts->report_log_cnt = 0;
+@@ -1690,6 +1772,7 @@
+ 
+ 	ts->status |= NT36XXX_STATUS_SUSPEND;
+ 
++	/* cancel before taking the lock: the worker holds it while running */
+ 	cancel_delayed_work_sync(&ts->work);
+ 	cancel_delayed_work_sync(&ts->health_work);
+ 
+@@ -1698,12 +1781,14 @@
+ 	 * byte (EVENT_BUF_ADDR | 0x50).  Writing it to EVENT_BUF_ADDR itself
+ 	 * hits the report area instead of the command channel.
+ 	 */
++	mutex_lock(&ts->lock);
+ 	if (ts->mmap[MMAP_EVENT_BUF_ADDR]) {
+ 		ret = regmap_write(ts->regmap,
+ 				   ts->mmap[MMAP_EVENT_BUF_ADDR] |
+ 					   NT36XXX_EVT_HOST_CMD,
+ 				   NT36XXX_CMD_ENTER_SLEEP);
+ 	}
++	mutex_unlock(&ts->lock);
+ 
+ 	if (ret)
+ 		dev_err(ts->dev, "Cannot enter suspend!\n");
+@@ -1733,6 +1818,7 @@
+ 		schedule_delayed_work(&ts->work, 0);
+ 
+ 	ts->status &= ~NT36XXX_STATUS_SUSPEND;
++	ts->quiet_init = false;
+ 
+ 	schedule_delayed_work(&ts->health_work,
+ 			      msecs_to_jiffies(NT36XXX_HEALTH_PERIOD_MS));
