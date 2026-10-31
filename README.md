@@ -25,7 +25,7 @@ Everything here was developed and verified on real hardware.
 | **M5** display (DPU/DSI/panel) | ✅ works | DPU 8.6 + DSI 2.6 + `m19` panel at 1080x2460@90 with DSC, KTD3136 backlight, fbcon on `msmdrmfb` — [details](docs/m5-display.md) |
 | **M6** power / charging | ✅ works | ADSP firmware + QRTR + pd-mapper + pmic-glink, `battery`/`qcom-battmgr-*` power supplies — [details](docs/m6-power.md) |
 | **M7** touch (Novatek SPI) | ✅ works | NT36672E on QUPv3 wrapper 1 SE1 via GPI DMA, mainline regmap driver, runtime recovery — [details](docs/m7-touch.md) |
-| **M8** Wi-Fi / BT (WCN6750) | 🚧 next | WPSS remoteproc + ath11k ahb, then `hci_qca` for BT — [handoff](docs/wifi-handoff/HANDOFF.md) |
+| **M8** Wi-Fi / BT (WCN6750) | 🚧 in progress | WPSS + WLFW QMI handshake work; `wlan0` needs the SNOC/adrastea variant ported into ath11k (the firmware rejects the hybrid-bus `DEVICE_INFO` request) — [details](docs/m8-wifi.md) |
 
 Current boot chain:
 

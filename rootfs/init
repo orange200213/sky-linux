@@ -24,6 +24,11 @@ mount -t devpts   devpts   /dev/pts  2>/dev/null
 mount -t tmpfs    tmpfs    /dev/shm  2>/dev/null
 mkdir -p /run/sshd /var/empty /log
 
+# Wi-Fi (WCN6750): the WLAN firmware lives in the rootfs, so the WPSS
+# remoteproc auto-boot (before switch_root) and the ath11k probe both fail.
+# The helper starts WPSS and rebinds ath11k once /lib/firmware is readable.
+[ -x /usr/local/sbin/sky-wifi-up.sh ] && /usr/local/sbin/sky-wifi-up.sh &
+
 insmod /lib/modules/$(uname -r)/extra/ktd3136.ko 2>/dev/null
 insmod /lib/modules/$(uname -r)/extra/panel-xiaomi-m19.ko clock_khz=$(cat /etc/sky-panel-clock 2>/dev/null || echo 276180) 2>/dev/null
 hostname sky 2>/dev/null

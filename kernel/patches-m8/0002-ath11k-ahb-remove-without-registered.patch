@@ -1,0 +1,34 @@
+From: Miaoqing Pan <miaoqing.pan@oss.qualcomm.com>
+Subject: [PATCH 2/2] wifi: ath11k: fix NULL dereference in ahb remove when QMI init incomplete
+
+Backport of upstream 1a7bcf5324c8 ("wifi: ath11k: fix NULL dereference in ahb
+remove when QMI init incomplete"). On WCN6750, if WLAN init stops before the
+device is registered (no QMI), ath11k_ahb_remove() still called
+ath11k_core_deinit() and crashed in ath11k_ce_cleanup_pipes() - exactly what
+unbinding the stalled device does on sky.
+
+Signed-off-by: Miaoqing Pan <miaoqing.pan@oss.qualcomm.com>
+---
+
+diff --git a/drivers/net/wireless/ath/ath11k/ahb.c b/drivers/net/wireless/ath/ath11k/ahb.c
+index ec5bf5c9f..4f653fcc7 100644
+--- a/drivers/net/wireless/ath/ath11k/ahb.c
++++ b/drivers/net/wireless/ath/ath11k/ahb.c
+@@ -1296,14 +1296,15 @@ static void ath11k_ahb_remove(struct platform_device *pdev)
+ {
+ 	struct ath11k_base *ab = platform_get_drvdata(pdev);
+ 
+-	if (test_bit(ATH11K_FLAG_QMI_FAIL, &ab->dev_flags)) {
++	ath11k_ahb_remove_prepare(ab);
++
++	if (!test_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags)) {
+ 		ath11k_ahb_power_down(ab, false);
+ 		ath11k_debugfs_soc_destroy(ab);
+ 		ath11k_qmi_deinit_service(ab);
+ 		goto qmi_fail;
+ 	}
+ 
+-	ath11k_ahb_remove_prepare(ab);
+ 	ath11k_core_deinit(ab);
+ 
+ qmi_fail:

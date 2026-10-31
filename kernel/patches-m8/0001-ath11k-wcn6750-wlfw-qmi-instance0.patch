@@ -1,0 +1,30 @@
+From: sky-linux M8 bring-up
+Subject: [PATCH 1/2] wifi: ath11k: use WLFW QMI instance 0 on wcn6750 (sky)
+
+This board's stock adrastea/WCN6750 firmware (NON-HLOS.bin) registers the
+WLFW service as qrtr instance field version|instance<<8 == 0x0001, i.e.
+QMI version 1 / instance 0. Upstream asks for instance 3 (0x0301), which the
+qrtr name service never matches: the driver then stalls with no wlan0.
+
+Verified on hardware with a qrtr name-service dump.
+---
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.c b/drivers/net/wireless/ath/ath11k/core.c
+index 8039124e7..0fc52c027 100644
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -589,7 +589,13 @@ static const struct ath11k_hw_params ath11k_hw_params[] = {
+ 		.ring_mask = &ath11k_hw_ring_mask_wcn6750,
+ 		.internal_sleep_clock = false,
+ 		.regs = &wcn6750_regs,
+-		.qmi_service_ins_id = ATH11K_QMI_WLFW_SERVICE_INS_ID_V01_WCN6750,
++		/* sky: this board's stock adrastea (WCN6750) WPSS firmware from
++		 * NON-HLOS.bin registers WLFW as version 1 / instance 0, i.e. the
++		 * qrtr lookup value is version | instance << 8 == 0x01.  The
++		 * upstream value (instance 3 -> 0x0301) never matches, so WLAN
++		 * init stalled with no wlan0 (see sky-linux docs/m8-wifi.md).
++		 */
++		.qmi_service_ins_id = 0x00,
+ 		.host_ce_config = ath11k_host_ce_config_qca6390,
+ 		.ce_count = 9,
+ 		.target_ce_config = ath11k_target_ce_config_wlan_qca6390,

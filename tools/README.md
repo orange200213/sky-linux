@@ -7,6 +7,7 @@
 | `dtsbuild.sh` | preprocesses a `.dts` with the kernel's bindings (`KDIR=…`) and runs `dtc`; fails loudly and deletes the output if `dtc` errors |
 | `mksky_dts.py` | generates `dts/sm4450-xiaomi-sky.dts` from the ROCKNIX Anbernic board file, patching in sky-specific nodes (memory, framebuffer, USB mode, panel rails, GPU/UFS status) |
 | `dts_parse.py` | small DTS parser used by the generator and by the hardware audit |
+| `qrtrls.c` | debug helper for the QRTR name service (`aarch64-linux-gnu-gcc -static -o qrtrls qrtrls.c`); `qrtrls 0x45` lists who registered the WCN6750 WLFW QMI service and with which instance |
 
 Typical pipeline:
 

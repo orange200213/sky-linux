@@ -265,6 +265,17 @@
 			interrupt-controller;
 			#interrupt-cells = <2>;
 		};
+
+		wlan_smp2p_out: wlan-ap-to-wpss {
+			qcom,entry-name = "wlan";
+			#qcom,smem-state-cells = <1>;
+		};
+
+		wlan_smp2p_in: wlan-wpss-to-ap {
+			qcom,entry-name = "wlan";
+			interrupt-controller;
+			#interrupt-cells = <2>;
+		};
 	};
 };
 
@@ -765,7 +776,7 @@
 		qcom,smem-states = <&smp2p_wpss_out 0>;
 		qcom,smem-state-names = "stop";
 
-		firmware-name = "qcom/sm4450/RG55G1/wpss.mbn";
+		firmware-name = "qcom/sm4450/xiaomi-sky/wpss.mdt";
 
 		glink-edge {
 			interrupts-extended = <&ipcc IPCC_CLIENT_WPSS
@@ -1705,13 +1716,16 @@
 
 		iommus = <&apps_smmu 0x4c0 0x1>;
 
+		qcom,rproc = <&remoteproc_wpss>;
+		qcom,smem-states = <&wlan_smp2p_out 0>;
+		qcom,smem-state-names = "wlan-smp2p-out";
+
 		vdd-0.8-cx-mx-supply = <&vreg_l11b_0p348>;
 		vdd-1.8-xo-supply = <&vreg_l23b_1p8>;
 		vdd-1.3-rfa-supply = <&vreg_l14b_1p15>;
 		vdd-3.3-ch0-supply = <&vreg_l7e_3>;
 
-
-		status = "disabled"; /* enable with WPSS/ath11k */
+		status = "okay";
 	};
 };
 
