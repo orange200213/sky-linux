@@ -428,6 +428,42 @@ advantage — "this is what Android runs" — is already captured: the stock
 msa_mem_info/msa_ready, cap, BDF) and the register/IRQ model we implemented in
 `ath11k`. Keep using it as *documentation*, not as build input.
 
+### 2.10 Kernel `#73`: `ddr_range` in `host_cap`, and the state gate stays
+
+`#73` adds the missing `host_cap` TLV 0x1F (`ddr_range`, 3-entry static array,
+same layout as the stock `wlfw_host_cap_req_msg_v01`) and a `snoc_ddr_range`
+knob (0 = none, 1 = whole 32-bit window + MSA, 2 = stock `0xa0000000+0x10000000`
++ MSA). `host_cap` now reports `0+0x100000000, 0x82a00000+0x300000` and is
+accepted by the firmware.
+
+Measured afterwards (all via `/etc/sky-wifi-params` + reboot, no reflash):
+
+| Variant | Result |
+|---|---|
+| default (host_cap + MSA + wait for `MSA_READY_IND` + BDF) | BDF `1 19` |
+| `snoc_host_cap=0 snoc_bdf_wait_ind=n` — **exactly the stock icnss2 ADRASTEA order** (no host_cap, BDF immediately after cap) | BDF `1 19` |
+| `regdb_download=n` (BDF only) | BDF `1 19` |
+| `snoc_bdf_type=1` (ELF instead of BIN) | BDF `1 19` |
+| `snoc_fixed_mem=n` (host DDR, now with `ddr_range` present) | `RESPOND_MEM` still `1 48` (`INVALID_ARG`) at IOVA `0xffe00000`, then BDF `1 90` |
+
+So the message order, the BDF type, the regdb and the DDR range announcement
+are all ruled out. What the stock stack does that we still do not do is the
+*platform* side of icnss2's probe: `icnss_smmu_init()` (attach the WLAN SMMU
+domain and program the `qcom,iommu-dma-addr-pool` window, `qcom,iommu-dma =
+"fastmap"`) and `icnss_hw_power_on()` (rails + the `cxo_ref_clk_pin` clock).
+In mainline the SMMU side is whatever `arm-smmu-qcom` set up for the device and
+we run the `use_tz` MSA path, i.e. the firmware's MSA is expected to be mapped
+by the TZ alone.
+
+Next experiment (needs a DTB change, so one flash): make ath11k map the
+firmware regions itself instead of trusting the TZ - add the `wifi-firmware`
+child node plus a second `memory-region` (CE) to the wifi node, exactly like
+`arch/arm64/boot/dts/qcom/kodiak.dtsi`, so that
+`ath11k_ahb_fw_resources_init()` allocates its own IOMMU domain and
+`iommu_map()`s MSA + CE with the device's SID (`0x4c0`). If the BDF download
+still refuses, the remaining suspect is the clock/power vote that only
+`icnss_hw_power_on()` does.
+
 ## 3. What is installed on the device
 
 | Path | Content | Backup |
