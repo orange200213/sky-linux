@@ -662,6 +662,44 @@ Two open questions for the next session, in order of value:
    already running on the WPSS (`copy_engine.c` asserts while we poke around
    the CE block, so it is watching).
 
+### 2.15 Confirmation: yes the host programs the rings, and the stock static window table does not fit either
+
+Answered from the stock sources (kernel `#83` implements the result):
+
+* the host **does** program the data-path rings (`hal_srng_setup()` in
+  `qca-wifi-host-cmn/hal/wifi3.0/hal_srng.c`, called from the DP init path), so
+  this is not a "the firmware owns the rings" design;
+* `hal_target_based_configure()` sets, for `TARGET_TYPE_QCA6750`:
+  `use_register_windowing = true; static_window_map = true;`
+* the static map is `hal_get_window_address_6750()` (hal/wifi3.0/qca6750/hal_6750.c):
+
+```
+#define UMAC_WINDOW_REMAP_RANGE 0x14
+#define CE_WINDOW_REMAP_RANGE   0x37      /* 0x37 * 0x80000 = 0x1b80000 */
+#define CMEM_WINDOW_REMAP_RANGE 0x02
+window = (offset >> 19) & 0x3f;
+  UMAC -> scale 1, CE -> scale 2, CMEM -> scale 3
+addr = scale * 0x80000 + (offset & 0x7ffff);
+```
+
+`#83` implements exactly that (modes 3/4, CE block optionally direct). Result:
+the DP ring write for the UMAC offset `0xa34874` becomes `membase + 0xb4874`
+(UMAC window 1), and **that aborts as well** - as did `0x80000`, `0x100000` and
+`0x180000` in the earlier builds.
+
+So on this device the membase aperture responds at `0x240000` (CE) and
+`0x30000` (SR_APSS) but **not** at the 0x80000/0x100000/0x180000 window area.
+That is consistent with the stock window scheme being a *PCI BAR* artefact
+("Device memory is 32MB but bar size is only 1MB" - hif_io32.h): with the BAR
+there is a 512 KiB direct area plus remap windows, while the SNOC membase is
+already a wide, direct view. The UMAC block therefore has to be somewhere the
+DT does not describe.
+
+Next experiment (`#84`): a one-shot probe that ioremaps a handful of candidate
+bases/windows and reads one known register from each (the kernel survives the
+external aborts, as the last runs show) so the real location of the UMAC /
+WBM / REO / TCL block is found in a single boot instead of one guess per flash.
+
 ## 3. What is installed on the device
 
 | Path | Content | Backup |

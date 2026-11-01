@@ -19,7 +19,7 @@ index ec5bf5c9f..b68716227 100644
 @@ -648,7 +649,16 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
  		irq_idx = ATH11K_IRQ_CE0_OFFSET + i;
 diff --git a/drivers/net/wireless/ath/ath11k/ahb.c b/drivers/net/wireless/ath/ath11k/ahb.c
-index ec5bf5c9f..7bb8cb90a 100644
+index ec5bf5c9f..b8fff7009 100644
 --- a/drivers/net/wireless/ath/ath11k/ahb.c
 +++ b/drivers/net/wireless/ath/ath11k/ahb.c
 @@ -44,6 +44,18 @@ MODULE_DEVICE_TABLE(of, ath11k_ahb_of_match);
@@ -94,7 +94,7 @@ index ec5bf5c9f..7bb8cb90a 100644
  	/* Configure external interrupts */
  	ret = ath11k_ahb_config_ext_irq(ab);
  	if (ret) {
-@@ -806,6 +839,91 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_ipq8074 = {
+@@ -806,6 +839,157 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_ipq8074 = {
  	.power_up = ath11k_ahb_power_up,
  };
  
@@ -118,9 +118,18 @@ index ec5bf5c9f..7bb8cb90a 100644
 + * 0 = plain MMIO, 1 = stock "PCIE_REMAP_1M_BAR_CTRL" selector window,
 + * 2 = CE block direct + selector window for everything above 512 KiB
 + */
-+static uint ath11k_snoc_reg_mode = 2;
++static uint ath11k_snoc_reg_mode = 4;
 +module_param_named(snoc_reg_mode, ath11k_snoc_reg_mode, uint, 0644);
-+MODULE_PARM_DESC(snoc_reg_mode, "0 mmio, 1 selector window, 2 CE direct + selector");
++MODULE_PARM_DESC(snoc_reg_mode,
++		 "0 mmio, 1 selector window, 2 CE direct + selector, 3 vendor static map, 4 static map + CE direct");
++
++/* the stock qca6750 HAL uses the static window map (hal_get_window_address_6750):
++ * UMAC -> window 1, CE -> window 2, CMEM -> window 3, where the window is
++ * selected by (offset >> 19) & 0x3f
++ */
++#define ATH11K_SNOC_UMAC_WINDOW		0x14
++#define ATH11K_SNOC_CE_WINDOW		0x37
++#define ATH11K_SNOC_CMEM_WINDOW		0x02
 +
 +#define ATH11K_SNOC_WINDOW_START	0x80000
 +#define ATH11K_SNOC_WINDOW_RANGE_MASK	0x7ffff
@@ -131,7 +140,7 @@ index ec5bf5c9f..7bb8cb90a 100644
 +
 +static bool ath11k_ahb_snoc_windowed(struct ath11k_base *ab, u32 offset)
 +{
-+	if (ath11k_snoc_reg_mode == 0)
++	if (ath11k_snoc_reg_mode == 0 || ath11k_snoc_reg_mode >= 3)
 +		return false;
 +
 +	if (offset < ATH11K_SNOC_WINDOW_START)
@@ -142,6 +151,40 @@ index ec5bf5c9f..7bb8cb90a 100644
 +		return false;
 +
 +	return true;
++}
++
++/* stock static window map: no selector register, the window comes from a
++ * fixed table indexed by the address itself
++ */
++static int ath11k_ahb_snoc_static_window(u32 offset, u32 *addr)
++{
++	u32 window = (offset >> 19) & 0x3f;
++	u32 scale;
++
++	switch (window) {
++	case ATH11K_SNOC_UMAC_WINDOW:
++		scale = 1;
++		break;
++	case ATH11K_SNOC_CE_WINDOW:
++		scale = 2;
++		break;
++	case ATH11K_SNOC_CMEM_WINDOW:
++		scale = 3;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	*addr = scale * ATH11K_SNOC_WINDOW_START +
++		(offset & ATH11K_SNOC_WINDOW_RANGE_MASK);
++
++	return 0;
++}
++
++static bool ath11k_ahb_snoc_ce_direct(struct ath11k_base *ab, u32 offset)
++{
++	return ath11k_snoc_reg_mode == 4 && offset >= ATH11K_SNOC_CE_START &&
++	       offset < ATH11K_SNOC_CE_END;
 +}
 +
 +static void ath11k_ahb_snoc_select_window(struct ath11k_base *ab, u32 offset)
@@ -156,6 +199,20 @@ index ec5bf5c9f..7bb8cb90a 100644
 +static void ath11k_ahb_window_write32_snoc(struct ath11k_base *ab, u32 offset,
 +					   u32 value)
 +{
++	u32 addr;
++
++	if (ath11k_snoc_reg_mode >= 3 && !ath11k_ahb_snoc_ce_direct(ab, offset)) {
++		if (ath11k_ahb_snoc_static_window(offset, &addr)) {
++			ath11k_warn(ab, "snoc: no static window for 0x%x\n",
++				    offset);
++			iowrite32(value, ab->mem + offset);
++			return;
++		}
++
++		iowrite32(value, ab->mem + addr);
++		return;
++	}
++
 +	if (!ath11k_ahb_snoc_windowed(ab, offset)) {
 +		iowrite32(value, ab->mem + offset);
 +		return;
@@ -168,6 +225,15 @@ index ec5bf5c9f..7bb8cb90a 100644
 +
 +static u32 ath11k_ahb_window_read32_snoc(struct ath11k_base *ab, u32 offset)
 +{
++	u32 addr;
++
++	if (ath11k_snoc_reg_mode >= 3 && !ath11k_ahb_snoc_ce_direct(ab, offset)) {
++		if (ath11k_ahb_snoc_static_window(offset, &addr))
++			return ioread32(ab->mem + offset);
++
++		return ioread32(ab->mem + addr);
++	}
++
 +	if (!ath11k_ahb_snoc_windowed(ab, offset))
 +		return ioread32(ab->mem + offset);
 +
@@ -186,7 +252,7 @@ index ec5bf5c9f..7bb8cb90a 100644
  static const struct ath11k_hif_ops ath11k_ahb_hif_ops_wcn6750 = {
  	.start = ath11k_pcic_start,
  	.stop = ath11k_pcic_stop,
-@@ -815,7 +933,7 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_wcn6750 = {
+@@ -815,7 +999,7 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_wcn6750 = {
  	.irq_enable = ath11k_pcic_ext_irq_enable,
  	.irq_disable = ath11k_pcic_ext_irq_disable,
  	.get_msi_address =  ath11k_pcic_get_msi_address,
@@ -195,7 +261,7 @@ index ec5bf5c9f..7bb8cb90a 100644
  	.map_service_to_pipe = ath11k_pcic_map_service_to_pipe,
  	.power_down = ath11k_ahb_power_down,
  	.power_up = ath11k_ahb_power_up,
-@@ -932,6 +1050,28 @@ static int ath11k_ahb_setup_resources(struct ath11k_base *ab)
+@@ -932,6 +1116,28 @@ static int ath11k_ahb_setup_resources(struct ath11k_base *ab)
  	if (ab->hw_params.hybrid_bus_type)
  		return ath11k_ahb_setup_msi_resources(ab);
  
@@ -224,7 +290,7 @@ index ec5bf5c9f..7bb8cb90a 100644
  	mem = devm_platform_get_and_ioremap_resource(pdev, 0, &mem_res);
  	if (IS_ERR(mem)) {
  		dev_err(&pdev->dev, "ioremap error\n");
-@@ -940,6 +1080,9 @@ static int ath11k_ahb_setup_resources(struct ath11k_base *ab)
+@@ -940,6 +1146,9 @@ static int ath11k_ahb_setup_resources(struct ath11k_base *ab)
  
  	ab->mem = mem;
  	ab->mem_len = resource_size(mem_res);
@@ -234,7 +300,7 @@ index ec5bf5c9f..7bb8cb90a 100644
  
  	return 0;
  }
-@@ -1191,6 +1334,40 @@ static int ath11k_ahb_probe(struct platform_device *pdev)
+@@ -1191,6 +1400,40 @@ static int ath11k_ahb_probe(struct platform_device *pdev)
  	if (ret)
  		goto err_core_free;
  
