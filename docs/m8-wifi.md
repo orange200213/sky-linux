@@ -464,6 +464,62 @@ child node plus a second `memory-region` (CE) to the wifi node, exactly like
 still refuses, the remaining suspect is the clock/power vote that only
 `icnss_hw_power_on()` does.
 
+### 2.11 Breakthrough: the BDF download works, the firmware boots, and the SNOC register window is now the blocker
+
+Three one-line causes were all that stood between "firmware rejects everything"
+and "driver runs the real init sequence".
+
+**1. `total_size` (kernel `#75`/`#76`).** The firmware accepts a segment only if
+`total_size` is the size of the *whole file*, not the amount still to come -
+i.e. exactly what the stock icnss2 does. ath11k sends `remaining`. The
+per-segment logging added in `#75` showed it plainly:
+
+```
+bdf seg 0 ok: len 6144 end 0 type 0 file_id 255 total 26328
+bdf seg 1 ok: ... seg 2 ok ... seg 3 ok
+board file download failed: seg 4 len 1752 end 1 type 0 file_id 255: 1 19
+```
+
+With `bdf_total_full=y` both the regdb (4 segments) and the BDF (5 segments,
+including the final `end=1` one) transfer completely.
+
+**2. cal data (`#76`).** ath11k then insists on a separate `cal-ahb-*.bin`,
+which this platform does not have (`cal_download` knob, off by default now).
+
+**3. `QMI_WLFW_CAL_REPORT_REQ_V01` (`0x26`, kernel `#78`).** The stock ADRASTEA
+branch sends a cal report right after the BDF; ath11k never does. With it
+(`snoc_cal_report`, on by default) the firmware finally continues and
+`ath11k_core_qmi_firmware_ready()` runs - the driver is in the real bring-up
+path for the first time.
+
+**4. CE/HAL init (`#79`).** `ath11k_ce_init_ring()` crashed on a NULL
+`ab->pci.msi.config` because the AHB hif ops point at the PCI MSI helper; `#79`
+adds `ath11k_ahb_get_user_msi_vector()`, which returns `-ENOPROTOOPT` in SNOC
+mode (one GIC line per CE, no MSI block).
+
+**Current blocker:** HAL SRNG setup for the CE rings then does a register write
+to offset `0x100000` in the membase window and takes a **synchronous external
+abort**:
+
+```
+pc : ath11k_ahb_window_write32_wcn6750+0x48/0x50
+lr : ath11k_pcic_write32+0x44/0xfc
+ath11k_hal_srng_setup+0x220/0x7ec -> ath11k_ce_init_ring+0x98/0x270
+Internal error: synchronous external abort: 0000000096000010 [#1]
+```
+
+The WCN6750 window scheme (`ath11k_ahb_get_window_start_wcn6750()`: UMAC range
+`0x00a00000` -> window at `ATH11K_PCI_WINDOW_START` `0x80000`, CE range ->
+`2 * 0x80000`, everything else direct) is the *PCI* layout. For the ADRASTEA
+SNOC variant the UMAC/DP/CE register blocks live at different offsets inside
+the 8 MiB membase (`0x22800000+0x800000`), so a direct access at `0x100000`
+hits nothing and the bus aborts.
+
+Next step: take the register map for the SNOC variant from the stock sources
+(the vendor `ath11k`/`icnss2` in the sky 5.10 tree, or `ravelin-adrastea.dtsi`
+if it lists extra `reg` windows) and teach `ath11k_ahb_window_*_wcn6750()` and
+`ath11k_ahb_read32()/write32()` the SNOC layout.
+
 ## 3. What is installed on the device
 
 | Path | Content | Backup |
