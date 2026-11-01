@@ -19,16 +19,21 @@ index ec5bf5c9f..b68716227 100644
 @@ -648,7 +649,16 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
  		irq_idx = ATH11K_IRQ_CE0_OFFSET + i;
 diff --git a/drivers/net/wireless/ath/ath11k/ahb.c b/drivers/net/wireless/ath/ath11k/ahb.c
-index ec5bf5c9f..3856de0fe 100644
+index ec5bf5c9f..7716e6853 100644
 --- a/drivers/net/wireless/ath/ath11k/ahb.c
 +++ b/drivers/net/wireless/ath/ath11k/ahb.c
-@@ -44,6 +44,13 @@ MODULE_DEVICE_TABLE(of, ath11k_ahb_of_match);
+@@ -44,6 +44,18 @@ MODULE_DEVICE_TABLE(of, ath11k_ahb_of_match);
  
  #define ATH11K_IRQ_CE0_OFFSET 4
  
 +/* SNOC variant: does the firmware own its MSA (fixed_fw_mem) or does it ask
 + * the host for DDR memory over QMI?  Both flows exist in the WLFW protocol.
 + */
++/* SNOC mode: map a larger membase window than the DT describes (MiB, 0 = DT) */
++static uint ath11k_snoc_membase_mib;
++module_param_named(snoc_membase_mib, ath11k_snoc_membase_mib, uint, 0644);
++MODULE_PARM_DESC(snoc_membase_mib, "SNOC mode: membase window size in MiB (0 = DT size)");
++
 +static bool ath11k_snoc_fixed_mem = true;
 +module_param_named(snoc_fixed_mem, ath11k_snoc_fixed_mem, bool, 0644);
 +MODULE_PARM_DESC(snoc_fixed_mem, "SNOC mode: firmware owns its MSA region");
@@ -36,7 +41,7 @@ index ec5bf5c9f..3856de0fe 100644
  static const char *irq_name[ATH11K_IRQ_NUM_MAX] = {
  	"misc-pulse1",
  	"misc-latch",
-@@ -469,7 +476,9 @@ static void ath11k_ahb_free_irq(struct ath11k_base *ab)
+@@ -469,7 +481,9 @@ static void ath11k_ahb_free_irq(struct ath11k_base *ab)
  		return ath11k_pcic_free_irq(ab);
  
  	ath11k_ahb_free_ce_irqs(ab, ab->hw_params.ce_count);
@@ -47,7 +52,7 @@ index ec5bf5c9f..3856de0fe 100644
  }
  
  static void ath11k_ahb_ce_tasklet(struct tasklet_struct *t)
-@@ -632,6 +641,7 @@ static int ath11k_ahb_config_ext_irq(struct ath11k_base *ab)
+@@ -632,6 +646,7 @@ static int ath11k_ahb_config_ext_irq(struct ath11k_base *ab)
  
  static int ath11k_ahb_config_irq(struct ath11k_base *ab)
  {
@@ -55,7 +60,7 @@ index ec5bf5c9f..3856de0fe 100644
  	int irq, irq_idx, i;
  	int ret;
  
-@@ -648,7 +658,16 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
+@@ -648,7 +663,16 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
  		irq_idx = ATH11K_IRQ_CE0_OFFSET + i;
  
  		tasklet_setup(&ce_pipe->intr_tq, ath11k_ahb_ce_tasklet);
@@ -73,7 +78,7 @@ index ec5bf5c9f..3856de0fe 100644
  		ret = request_irq(irq, ath11k_ahb_ce_interrupt_handler,
  				  IRQF_TRIGGER_RISING, irq_name[irq_idx],
  				  ce_pipe);
-@@ -661,6 +680,15 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
+@@ -661,6 +685,15 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
  		ab->irq_num[irq_idx] = irq;
  	}
  
@@ -89,7 +94,7 @@ index ec5bf5c9f..3856de0fe 100644
  	/* Configure external interrupts */
  	ret = ath11k_ahb_config_ext_irq(ab);
  	if (ret) {
-@@ -806,6 +834,43 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_ipq8074 = {
+@@ -806,6 +839,43 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_ipq8074 = {
  	.power_up = ath11k_ahb_power_up,
  };
  
@@ -133,7 +138,7 @@ index ec5bf5c9f..3856de0fe 100644
  static const struct ath11k_hif_ops ath11k_ahb_hif_ops_wcn6750 = {
  	.start = ath11k_pcic_start,
  	.stop = ath11k_pcic_stop,
-@@ -815,7 +880,7 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_wcn6750 = {
+@@ -815,7 +885,7 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_wcn6750 = {
  	.irq_enable = ath11k_pcic_ext_irq_enable,
  	.irq_disable = ath11k_pcic_ext_irq_disable,
  	.get_msi_address =  ath11k_pcic_get_msi_address,
@@ -142,7 +147,36 @@ index ec5bf5c9f..3856de0fe 100644
  	.map_service_to_pipe = ath11k_pcic_map_service_to_pipe,
  	.power_down = ath11k_ahb_power_down,
  	.power_up = ath11k_ahb_power_up,
-@@ -940,6 +1005,9 @@ static int ath11k_ahb_setup_resources(struct ath11k_base *ab)
+@@ -932,6 +1002,28 @@ static int ath11k_ahb_setup_resources(struct ath11k_base *ab)
+ 	if (ab->hw_params.hybrid_bus_type)
+ 		return ath11k_ahb_setup_msi_resources(ab);
+ 
++	if (ath11k_ahb_priv(ab)->snoc_ahb && ath11k_snoc_membase_mib) {
++		phys_addr_t start;
++		size_t len = (size_t)ath11k_snoc_membase_mib * SZ_1M;
++
++		mem_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++		if (!mem_res)
++			return -ENOENT;
++
++		start = mem_res->start;
++		mem = devm_ioremap(&pdev->dev, start, len);
++		if (!mem)
++			return -ENOMEM;
++
++		ab->mem = mem;
++		ab->mem_len = len;
++		ab->mem_ce = ab->mem;
++
++		ath11k_info(ab, "snoc mode: membase %zu MiB @%pa\n", len / SZ_1M,
++			    &start);
++		return 0;
++	}
++
+ 	mem = devm_platform_get_and_ioremap_resource(pdev, 0, &mem_res);
+ 	if (IS_ERR(mem)) {
+ 		dev_err(&pdev->dev, "ioremap error\n");
+@@ -940,6 +1032,9 @@ static int ath11k_ahb_setup_resources(struct ath11k_base *ab)
  
  	ab->mem = mem;
  	ab->mem_len = resource_size(mem_res);
@@ -152,7 +186,7 @@ index ec5bf5c9f..3856de0fe 100644
  
  	return 0;
  }
-@@ -1191,6 +1259,40 @@ static int ath11k_ahb_probe(struct platform_device *pdev)
+@@ -1191,6 +1286,40 @@ static int ath11k_ahb_probe(struct platform_device *pdev)
  	if (ret)
  		goto err_core_free;
  

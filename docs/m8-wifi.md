@@ -563,6 +563,47 @@ DP rings then program, the map is simply bigger than the DT describes;
 otherwise the SNOC ring registers live at adrastea-specific offsets that still
 have to be derived.
 
+### 2.13 Kernel `#81`: a bigger membase window does not reach the UMAC block
+
+`#81` adds `snoc_membase_mib` (map more than the DT's 8 MiB). Two measurements
+settle what the data-path rings need:
+
+| mapping | write to `membase + 0xa34874` (WBM ring) |
+|---|---|
+| 8 MiB (DT) | kernel page fault (`FSC = 0x06`, level 2 translation fault) |
+| 16 MiB | **synchronous external abort** (`ESR 0x96000010`) |
+
+So the pages exist at 16 MiB, but the hardware does not decode
+`0x22800000 + 0xa34874`. Together with the earlier finding that
+`adrastea_reg_def.h` never describes anything above `0x002F1008`, the UMAC /
+WBM / REO / TCL ring registers are **not** directly reachable from the host on
+this variant - the stock driver must reach them some other way.
+
+The strongest candidate in the vendor register header is the **SR_APSS shadow
+register interface** at the bottom of the membase:
+
+```
+ADRASTEA_A_WCSS_SR_APSS_SHADOW_ADDRESS0..17   (0x00030000 + n*8)
+ADRASTEA_A_WCSS_SR_APSS_SHADOW_VALUE0..17
+ADRASTEA_A_WCSS_SR_APSS_SHADOW_ADDRESS2__ADDRESS_REGISTER___M 0x003FFFFF
+ADRASTEA_A_WCSS_SR_APSS_DIRTY / _ADDRESS_VALID / _INVALID_ADDR_ACCESS
+ADRASTEA_A_WCSS_SR_APSS_SR_CONTROL / _SR_INTERRUPT_CLEAR
+```
+
+i.e. "write address, write value, wait for the handshake" instead of a plain
+MMIO store, with a 22-bit address window (4 MiB) that the UMAC offsets
+(`0xa00000 & 0x3fffff = 0x200000`) fit into.
+
+Also worth noting from this run: the firmware itself asserts while this happens
+(`cmnos_thread.c:4003: Asserted in copy_engine.c:_CE_misc_handler:2227`) and the
+WPSS is then recovered by remoteproc, so the CE/MISC registers we already touch
+are being watched.
+
+Next step: implement the shadow-register write/read path for the UMAC range in
+`ath11k_ahb_window_{read,write}32_snoc()` and see whether the DP rings program.
+Reference: `qca-wifi-host-cmn/hif/src/adrastea_reg_def.h` (register set) and
+`copy_engine.c`/`qmi_platform.c` behaviour above.
+
 ## 3. What is installed on the device
 
 | Path | Content | Backup |
