@@ -520,6 +520,49 @@ Next step: take the register map for the SNOC variant from the stock sources
 if it lists extra `reg` windows) and teach `ath11k_ahb_window_*_wcn6750()` and
 `ath11k_ahb_read32()/write32()` the SNOC layout.
 
+### 2.12 Kernel `#80`: CE init passes, the DP/UMAC register window is the last mapping question
+
+`#80` does three things for SNOC mode: the window ops become plain MMIO, the CE
+ring bases are patched to the adrastea values from the vendor's own register
+header (`ADRASTEA_A_WCSS_HM_A_WIFI_APB_1_A_WFSS_CE0_SR_BA_LOW = 0x00240000`,
+`..._CE0_DR_BA_LOW = 0x0024000c`, one 0x1000 block per CE), and `mem_ce` is set
+so `ATH11K_CE_OFFSET()` is zero. Note that plain MMIO *alone* (the obvious
+"just drop the window arithmetic" patch) cannot work: mainline's CE bases
+(`0x01b80000`) are PCI-window space and land outside the 8 MiB membase.
+
+Result: **CE initialisation passes** - the crash moved one level up to
+
+```
+pc : ath11k_ahb_window_write32_snoc+0xc/0x14
+ath11k_hal_srng_setup+0x220/0x7ec
+ath11k_dp_srng_setup+0x200/0x490
+ath11k_dp_alloc+0x7c/0x5f0
+ath11k_core_qmi_firmware_ready+0xd8/0x5a4
+```
+
+i.e. the data-path rings. Their register offsets are the `HAL_SEQ_WCSS_UMAC_*`
+constants (`WBM 0x00a34000`, `REO 0x00a38000`, `TCL 0x00a44000`) - the same
+values the vendor `fw-api/hw/qca6750/v1/wcss_seq_hwiobase.h` uses - but they
+are *above* the 8 MiB membase, so a direct access aborts.
+
+Facts collected while chasing this (all from the vendor sources):
+
+* the stock `icnss2` maps only `resource_size(reg)` (8 MiB) for SNOC and its
+  `hif_write32_mb()` is a plain `iowrite32()` (`hif_io32.h`: the register-window
+  helper is `#if defined(HIF_REG_WINDOW_SUPPORT) && defined(HIF_PCI)`), so the
+  offsets it uses for SNOC *cannot* be the PCI ones;
+* `adrastea_reg_def.h` only ever describes offsets up to `0x002F1008`
+  (CE blocks at `0x240000+`, WCSS_HM/`SR_APSS` registers at `0x2f1000`/`0x30000`),
+  i.e. the host-visible view is the first ~3 MiB of the membase;
+* mainline already has the "shadow register" machinery for REO/TCL rings
+  (`ath11k_hw_params.supports_shadow_regs`, `HAL_SHADOW_REG()`).
+
+Next experiment (`#81`, cheap and decisive): ioremap the membase with a larger
+window in SNOC mode (e.g. 16 MiB) and keep the standard UMAC offsets - if the
+DP rings then program, the map is simply bigger than the DT describes;
+otherwise the SNOC ring registers live at adrastea-specific offsets that still
+have to be derived.
+
 ## 3. What is installed on the device
 
 | Path | Content | Backup |

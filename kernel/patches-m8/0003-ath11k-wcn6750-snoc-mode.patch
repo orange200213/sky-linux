@@ -19,7 +19,7 @@ index ec5bf5c9f..b68716227 100644
 @@ -648,7 +649,16 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
  		irq_idx = ATH11K_IRQ_CE0_OFFSET + i;
 diff --git a/drivers/net/wireless/ath/ath11k/ahb.c b/drivers/net/wireless/ath/ath11k/ahb.c
-index ec5bf5c9f..fa1752eaa 100644
+index ec5bf5c9f..3856de0fe 100644
 --- a/drivers/net/wireless/ath/ath11k/ahb.c
 +++ b/drivers/net/wireless/ath/ath11k/ahb.c
 @@ -44,6 +44,13 @@ MODULE_DEVICE_TABLE(of, ath11k_ahb_of_match);
@@ -89,7 +89,7 @@ index ec5bf5c9f..fa1752eaa 100644
  	/* Configure external interrupts */
  	ret = ath11k_ahb_config_ext_irq(ab);
  	if (ret) {
-@@ -806,6 +834,22 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_ipq8074 = {
+@@ -806,6 +834,43 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_ipq8074 = {
  	.power_up = ath11k_ahb_power_up,
  };
  
@@ -109,10 +109,31 @@ index ec5bf5c9f..fa1752eaa 100644
 +						   user_base_data, base_vector);
 +}
 +
++/* The ADRASTEA/SNOC variant exposes the whole register block in the DT
++ * "membase", so the PCI window arithmetic must not be applied.
++ */
++static void ath11k_ahb_window_write32_snoc(struct ath11k_base *ab, u32 offset,
++					   u32 value)
++{
++	iowrite32(value, ab->mem + offset);
++}
++
++static u32 ath11k_ahb_window_read32_snoc(struct ath11k_base *ab, u32 offset)
++{
++	return ioread32(ab->mem + offset);
++}
++
++static const struct ath11k_pci_ops ath11k_ahb_pci_ops_snoc = {
++	.wakeup = NULL,
++	.get_msi_irq = ath11k_ahb_get_msi_irq_wcn6750,
++	.window_write32 = ath11k_ahb_window_write32_snoc,
++	.window_read32 = ath11k_ahb_window_read32_snoc,
++};
++
  static const struct ath11k_hif_ops ath11k_ahb_hif_ops_wcn6750 = {
  	.start = ath11k_pcic_start,
  	.stop = ath11k_pcic_stop,
-@@ -815,7 +859,7 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_wcn6750 = {
+@@ -815,7 +880,7 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_wcn6750 = {
  	.irq_enable = ath11k_pcic_ext_irq_enable,
  	.irq_disable = ath11k_pcic_ext_irq_disable,
  	.get_msi_address =  ath11k_pcic_get_msi_address,
@@ -121,7 +142,17 @@ index ec5bf5c9f..fa1752eaa 100644
  	.map_service_to_pipe = ath11k_pcic_map_service_to_pipe,
  	.power_down = ath11k_ahb_power_down,
  	.power_up = ath11k_ahb_power_up,
-@@ -1191,6 +1235,18 @@ static int ath11k_ahb_probe(struct platform_device *pdev)
+@@ -940,6 +1005,9 @@ static int ath11k_ahb_setup_resources(struct ath11k_base *ab)
+ 
+ 	ab->mem = mem;
+ 	ab->mem_len = resource_size(mem_res);
++	/* the SNOC variant has no separate CE window */
++	if (ath11k_ahb_priv(ab)->snoc_ahb)
++		ab->mem_ce = ab->mem;
+ 
+ 	return 0;
+ }
+@@ -1191,6 +1259,40 @@ static int ath11k_ahb_probe(struct platform_device *pdev)
  	if (ret)
  		goto err_core_free;
  
@@ -132,9 +163,31 @@ index ec5bf5c9f..fa1752eaa 100644
 +	 */
 +	if (of_property_present(pdev->dev.of_node, "qcom,snoc-ahb")) {
 +		ath11k_info(ab, "snoc mode: membase registers, per-CE interrupts\n");
++		struct ath11k_hw_regs *regs;
++
 +		ath11k_ahb_priv(ab)->snoc_ahb = true;
 +		ab->hw_params.hybrid_bus_type = false;
 +		ab->hw_params.fixed_fw_mem = ath11k_snoc_fixed_mem;
++
++		/* the SNOC register block is not the PCI BAR: no windowing */
++		ath11k_pcic_register_pci_ops(ab, &ath11k_ahb_pci_ops_snoc);
++
++		/* adrastea host register map: one 0x1000 block per CE, the src
++		 * ring registers at +0x00 and the dst ring registers at +0x0c
++		 * (see ADRASTEA_A_WCSS_HM_A_WIFI_APB_1_A_WFSS_CE0_* in the
++		 * vendor adrastea_reg_def.h)
++		 */
++		regs = devm_kmemdup(&pdev->dev, ab->hw_params.regs,
++				    sizeof(*regs), GFP_KERNEL);
++		if (!regs) {
++			ret = -ENOMEM;
++			goto err_core_free;
++		}
++		regs->hal_seq_wcss_umac_ce0_src_reg = 0x00240000;
++		regs->hal_seq_wcss_umac_ce0_dst_reg = 0x0024000c;
++		regs->hal_seq_wcss_umac_ce1_src_reg = 0x00241000;
++		regs->hal_seq_wcss_umac_ce1_dst_reg = 0x0024100c;
++		ab->hw_params.regs = regs;
 +	}
 +
  	ret = ath11k_ahb_setup_resources(ab);
