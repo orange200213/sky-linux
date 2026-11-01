@@ -329,6 +329,39 @@ The two remaining candidate sequences are:
    (`ath11k_ahb_fw_resources_init()` + a `wifi-firmware` child node as in
    `arch/arm64/boot/dts/qcom/kodiak.dtsi`), so it is the larger of the two.
 
+### 2.9 What the firmware actually asks for (kernel `#72`)
+
+Kernel `#72` logs the WLFW memory handshake at `info` level. With
+`snoc_fixed_mem=n` (host-provided DDR) the answer is short and clear:
+
+```
+ath11k: fw memory request: 1 segment(s)
+ath11k:   seg 0: type 0 size 0x100000 (1048576)      /* HOST_DDR_REGION_TYPE */
+ath11k:   dma seg 0: type 0 size 0x100000 -> paddr 0x00000000ffe00000
+ath11k: respond mem: 1 segment(s)
+ath11k:   rsp seg 0: type 0 size 0x100000 addr 0x00000000ffe00000
+ath11k: qmi respond memory request failed: 1 48      /* QMI_ERR_INVALID_ARG */
+```
+
+So the firmware wants **one 1 MiB host-DDR chunk** and rejects our answer. Two
+things are wrong with it, both visible in the vendor DT/driver:
+
+* the address is an IOVA handed out by the DMA API near the top of the 32-bit
+  space (`0xffe00000`), while the stock node pins the WLAN IOVA pool to
+  `qcom,iommu-dma-addr-pool = <0xa0000000 0x10000000>`; mainline has **no
+  support for that property**, so the IOVA lands outside the window the
+  firmware's SMMU context (set up by the TZ) can reach;
+* `host_cap` is sent **without `ddr_range`**. The stock `icnss2` fills it with
+  `ddr_range[0] = {iova_start, iova_size + iova_ipa_size}` and
+  `ddr_range[1] = {msa_pa, msa_size}` whenever SMMU stage 1 is on, i.e. the
+  firmware never learns which DDR ranges it may use - a range check failing
+  with `INVALID_ARG` matches that.
+
+Next steps on this path (in order): send `ddr_range` in `host_cap` like the
+vendor, then make the chunk address land inside `0xa0000000 + 0x10000000`
+(either by allocating the chunk from a dedicated reserved region declared in
+`ddr_range`, or by teaching the port to program the IOMMU domain's IOVA base).
+
 Both paths are switchable at run time (kernel `#71`), so the next session can
 iterate without reflashing:
 
