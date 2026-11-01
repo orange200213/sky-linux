@@ -126,3 +126,11 @@ Released boot images and what to do with them: `docs/install-and-usage.md`.
 
 Nothing here is upstream-ready yet; the patches are bring-up quality and
 deliberately minimal.
+
+### WiFi (M8) handoff
+
+* `docs/m8-wifi.md` - full experiment log (what the firmware wants, phase 1/2/3)
+* `docs/wifi-handoff/HANDOFF-snoc-mainline.md` - **working handoff for the
+  mainline ath11k SNOC port**: what works, the one blocker, next steps, the
+  runtime knobs, and every trap that cost time
+* `docs/wifi-handoff/NEXT-PROMPT.md` - ready-to-paste brief for a fresh session
