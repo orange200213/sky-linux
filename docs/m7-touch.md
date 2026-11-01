@@ -1,7 +1,24 @@
 # M7 — touchscreen (Novatek NT36672E over QUPv3 SPI)
 
-**Status: ✅ works.** Touch reports real multi-touch events on `/dev/input/event3`, survives
-long runs, and recovers from a wedged controller without a reboot.
+**Status: 🚧 partial.** Touch reports real multi-touch events on `/dev/input/event3`, survives
+long runs, and recovers from a wedged controller without a reboot — but read the scope of
+what has actually been validated:
+
+| What was verified | How | Caveat |
+|---|---|---|
+| the controller works end to end | raw events read with `dd if=/dev/input/event3 bs=24 … \| od -Ax -tx1` and `tools/decode_evdev.py` | **never yet exercised through a desktop / window manager** (no X, no Wayland, no Phosh/weston/libinput session has been run) |
+| panel `m19` (1080×2460, IPS LCD) only | this unit | no other panel or regional variant has been tried; coordinates are scaled for this panel |
+| Japanese-market Redmi 12 5G (`sky`), stock `V14.0.7.0.TMWINXM` | whole project | other variants of the same model may use a different touch controller/panel |
+| `sky-report` shows the IC in `NORMAL_RUN` (`state=a3…`), IRQ ≈ 12/s idle | `dmesg`, `/proc/interrupts` | — |
+
+**Known risk: touch can still drop.** The controller occasionally falls back into its reset
+state (`sky-report` turns into `0xFD`/`0xFE`, IRQ storm ~200/s). The driver now recovers in
+software **without a reboot** (SPI lock + `TP_RST` pulse + retry schedule), but why the IC
+dies in the first place is not fully explained (ESD event or an analog supply glitch are the
+remaining candidates). Treat a long-running session with touch as "usually fine, but it can
+wedge and needs a few seconds to heal".
+
+Because of the two points above this milestone is marked **partial**, not done.
 
 Reference image: `sky-shim-boot-v4-recover-hwreset.img`
 (sha256 `8ed569ca617688e8037a48ff0b4e54531bda3c55e0e7b731fd33b1b571c56bac`, 120,086,528 B),
@@ -172,6 +189,9 @@ dd if=/dev/input/event3 bs=24 count=200 2>/dev/null | od -Ax -tx1 -v   # EV_ABS 
 
 ## Known open items (stability testing)
 
+0. **Desktop / window-manager validation** — the only verification so far is raw
+   `/dev/input/event3` output. Run a real input stack (libinput + Wayland compositor or X)
+   and confirm clicks, drags, edge coordinates and multi-touch gestures.
 1. **Touch after display off/on and across a `fbcon` blank/unblank cycle** — the
    panel-follower suspend path writes `ENTER_SLEEP` to `EVENT_BUF_ADDR | 0x50`; that is new
    and untested on hardware.

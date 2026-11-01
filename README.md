@@ -1,5 +1,17 @@
 # sky-linux — mainline Linux on the Xiaomi Redmi 12 5G (SM4450 "sky")
 
+> **Tested on one variant only.** Everything in this repository was developed and
+> verified on the **Japanese-market Xiaomi Redmi 12 5G** (codename `sky`, SoC
+> SM4450 / "ravelin"), stock firmware **V14.0.7.0.TMWINXM** (Android 13). Other
+> regional variants of the same model share the name but can differ in panel,
+> touch controller, PMIC rails, modem/WLAN firmware and partition layout, so treat
+> every value here as "measured on that unit" until someone confirms it on
+> another variant.
+>
+> **AI assistance.** This project was built with the help of
+> **DeepSeek V4.1 (1017)** and **GPT-5.6 sol** — used for code, DTS work,
+> reverse-engineering and the documentation in this repository.
+
 Bring-up notes, patches and tools for running a **mainline Linux kernel** on the
 Xiaomi Redmi 12 5G (codename `sky`), a Qualcomm **SM4450 / "ravelin"**
 (Snapdragon 4 Gen 2) phone.
@@ -24,8 +36,8 @@ Everything here was developed and verified on real hardware.
 | **M4** UFS storage | ✅ works | `userdata` (ext4, 108 GiB) mounted read/write, persistent logs |
 | **M5** display (DPU/DSI/panel) | ✅ works | DPU 8.6 + DSI 2.6 + `m19` panel at 1080x2460@90 with DSC, KTD3136 backlight, fbcon on `msmdrmfb` — [details](docs/m5-display.md) |
 | **M6** power / charging | ✅ works | ADSP firmware + QRTR + pd-mapper + pmic-glink, `battery`/`qcom-battmgr-*` power supplies — [details](docs/m6-power.md) |
-| **M7** touch (Novatek SPI) | ✅ works | NT36672E on QUPv3 wrapper 1 SE1 via GPI DMA, mainline regmap driver, runtime recovery — [details](docs/m7-touch.md) |
-| **M8** Wi-Fi / BT (WCN6750) | 🚧 in progress | WPSS + WLFW QMI handshake work; `wlan0` needs the SNOC/adrastea variant ported into ath11k (the firmware rejects the hybrid-bus `DEVICE_INFO` request) — [details](docs/m8-wifi.md) |
+| **M7** touch (Novatek SPI) | 🚧 **partial** | NT36672E on QUPv3 wrapper 1 SE1 via GPI DMA, mainline regmap driver, runtime recovery. Verified **only on the `m19` panel** and **only from raw `/dev/input/event3` (`dd`) output** — never yet through a desktop/window manager, and the controller can still drop out (recovery exists, root cause of the IC death is not fully explained) — [details](docs/m7-touch.md) |
+| **M8** Wi-Fi / BT (WCN6750) | 🚧 in progress | WPSS boot, WLFW QMI, MSA handshake, regdb/BDF and the CE rings all work; blocked on **where the WCSS UMAC/WBM/REO/TCL register block lives on this SNOC variant** (every documented offset aborts) — [details](docs/m8-wifi.md), [working handoff](docs/wifi-handoff/HANDOFF-snoc-mainline.md) |
 
 Current boot chain:
 
@@ -92,6 +104,7 @@ fastboot flash boot_a /path/to/stock/boot.img
 | Storage | UFS 4.0, 2 lanes, `/dev/sda` = 117 GiB LUN with `userdata` (108 GiB) |
 | USB | dwc3 + SNPS femto HS PHY (no USB3 here) |
 | PMIC | PM6450 (+ PMK8350 RTC/ADC, PM7250B charger) |
+| Variant tested | Japanese-market Redmi 12 5G (`sky`), stock **V14.0.7.0.TMWINXM**; panel/touch/firmware values are from that unit only |
 | Firmware | UEFI (EDK2) on `uefi_a`, application processors start via PSCI |
 
 Details: `docs/hardware.md`.

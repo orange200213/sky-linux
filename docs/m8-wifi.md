@@ -820,21 +820,39 @@ Gotchas confirmed again on this board:
   lines (a sysrq-t dump is enough). Use `/log/` for anything that must survive.
 * `/sys/kernel/debug/gpio` still hangs the box — do not read it.
 
-## 6. Next steps
+## 6. Where it stands now, and what is still hard
 
-1. Port the SNOC/adrastea variant into ath11k (items 1–4 of §2.3), borrowing
-   from `ath10k/{snoc.c,qmi.c}` where possible (§2.5). The cheapest first
-   experiment: keep the current source and add a DT opt-in (e.g.
-   `qcom,snoc-ahb`) that, after `ath11k_core_pre_init()`, sets
-   `ab->hw_params.hybrid_bus_type = false` and `pci_ops = NULL` (keeping the
-   wcn6750 window ops for the register access), then take `ab->mem` from the
-   `membase` resource and request the CE IRQs by index like ath10k does;
-   `ab->hw_params` is a struct copy in `ath11k_base`, so it can be overridden
-   per device.
-2. Resolve the 12 unnamed interrupts for the non-hybrid path
-   (`platform_get_irq_byname()`), most likely by comparing with the vendor's
-   `icnss2` irq indices.
-3. If the firmware then still refuses `wlfw_msa_mem_info`/`msa_ready`, add those
-   two QMI messages (they are in the vendor's `wcnss` WLFW headers).
-4. Only after `wlan0` appears: `iw reg set`, scan, `wpa_supplicant`, DHCP — and
-   then Bluetooth (same WPSS state, `hci_qca` + `qcom,wcn6750-bt`).
+The SNOC/adrastea port described in §2.3 *was* written and taken much further in a
+dedicated thread; read **`docs/wifi-handoff/HANDOFF-snoc-mainline.md`** for the working
+handoff. Short version — solved (measured on hardware, kernel #83):
+
+* WPSS remoteproc boots from the split-MDT firmware (`wpss.mdt` + `b00..b08,b10`);
+* WLFW QMI over QRTR with **instance 0** (patch 0001), `chip_id 0x4130`,
+  `fw_version 0x343b815a …CI_WLAN.HL.3.4.3-00346.1`;
+* `host_cap` + `ddr_range`, MSA handshake (`msa_mem_info` / `msa_ready` /
+  `MSA_READY_IND`), regdb **and** BDF download (the `total_size`-per-segment semantic
+  fix), the mandatory `CAL_REPORT` (0x26), and CE0..CE11 ring initialisation;
+* `ath11k_core_qmi_firmware_ready()` runs — i.e. the whole firmware-side contract of
+  `ath11k` is satisfied.
+
+Still blocking, in the order they must be solved:
+
+1. **The WCSS UMAC/WBM/REO/TCL register block has no known address on this SNOC
+   variant.** `ath11k_dp_srng_setup()` → `ath11k_hal_srng_setup()` writes DP ring
+   registers at the `HAL_SEQ_WCSS_UMAC_*` offsets and dies with a synchronous external
+   abort. Measured: `membase+0` dead, `+0x30000` (SR_APSS) live, `+0x240000` (CE) live,
+   `+0x80000/0x100000/0x180000` dead, `+0xa34874` dead, and the vendor's static-window
+   map (window selector `ADRASTEA_WINDOW_*`) does not exist on adrastea. The remaining
+   candidates are a second physical base not described in the DT, or the SR_APSS shadow
+   write port (`SHADOW_ADDRESS0..23` / `SHADOW_VALUE0..23`).
+2. **Extended interrupt dispatch for SNOC** — `ath11k_ahb_config_irq()` returns early;
+   the SNOC DT has no named ext-IRQ resources, so this needs MISC-status dispatch or
+   per-group handling.
+3. **Then** the ordinary driver work: DP ring programming, `ath11k_core_start()` /
+   WMI-HTC, scan/associate, and finally Bluetooth (`hci_qca` + `qcom,wcn6750-bt`, same
+   WPSS state, firmware from the vendor partition).
+
+Realistic assessment: if step 1 shows the block simply lives at another physical base,
+this is a few more sessions of ordinary work. If it shows the block is unreachable from
+the APSS, the port needs the SR_APSS shadow write port — a much bigger and riskier job,
+and that is the point at which "mainline Wi-Fi on this device" has to be re-evaluated.

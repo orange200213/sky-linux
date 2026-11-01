@@ -1,8 +1,20 @@
 # M8 handoff — Wi-Fi / Bluetooth (WCN6750 "adrastea" on SM4450)
 
-State at handoff: **not started, but almost everything is already in place.** Touch (M7) is
-done; the kernel that is running on the device already contains the whole WLAN stack. What is
-missing is firmware and a few device-tree properties.
+> **This file is the starting point only.** It was written before the port was attempted.
+> The work then went much further and is now documented in
+> **`HANDOFF-snoc-mainline.md`** (working handoff, kernel #83) and `../m8-wifi.md`
+> (project context + experiment log). Read those two for the current state; use this file
+> for the firmware inventory and the first-boot recipe, which are still accurate.
+>
+> Current status in one paragraph: WPSS boots, the full WLFW/QMI contract is satisfied
+> (WLFW instance 0, `host_cap`/`ddr_range`, MSA handshake, regdb + BDF download with the
+> `total_size`-per-segment fix, the mandatory `CAL_REPORT`, CE0..CE11 rings) and
+> `ath11k_core_qmi_firmware_ready()` runs. It is blocked on one hardware question: **where
+> the WCSS UMAC/WBM/REO/TCL register block lives on this SNOC variant** — every offset
+> documented upstream aborts, the vendor's window-selector registers do not exist on
+> adrastea, and the two remaining candidates are a second physical base outside the DT
+> region or the SR_APSS shadow write port. Everything else (ext-IRQ dispatch, DP rings,
+> WMI/HTC, then BT) comes after that answer.
 
 ---
 

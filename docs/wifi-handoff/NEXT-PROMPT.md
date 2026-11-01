@@ -1,5 +1,19 @@
 # Next prompt (copy/paste to a fresh session)
 
+> **Scope of this project (state it in anything you publish).** Everything in this
+> repository was developed and verified on the **Japanese-market** Xiaomi Redmi 12 5G
+> (`sky`, SM4450 "ravelin"), stock firmware **V14.0.7.0.TMWINXM** (Android 13). Other
+> regional variants of the same model may differ in panel, touch controller, PMIC rails,
+> modem/WLAN firmware and partition layout — do not present any value here as universal.
+>
+> **Touch (M7) is *partial*, not done:** it works on the `m19` panel and has only been
+> verified from raw `/dev/input/event3` output (`dd` + `tools/decode_evdev.py`) — no
+> desktop/window manager has been run against it — and the controller can still drop out
+> (the driver recovers in software, but the root cause is not fully explained).
+>
+> **AI assistance:** this project was built with the help of **DeepSeek V4.1 (1017)** and
+> **GPT-5.6 sol**.
+
 > 目标：继续把 mainline `ath11k` 的 WCN6750 **SNOC/adrastea** 分支做完（Xiaomi Redmi 12 5G /
 > `sky` / SM4450 ravelin）。**不要**引入 downstream 内核、也不要移植 `qcacld-3.0`。
 >
