@@ -342,6 +342,59 @@ iterate without reflashing:
 with `/etc/sky-wifi-params` (`key=value` per line) applied by
 `rootfs/sky-wifi-up.sh` at boot, and `sysrq-b` to reboot.
 
+### 2.8 Evaluated alternative: out-of-tree qcacld-3.0 + icnss2 (rejected)
+
+The obvious "vendor stack" fallback — LineageOS/CAF `qcacld-3.0` +
+`qca-wifi-host-cmn` + `fw-api` + `icnss2`, which is what Android uses on this
+exact firmware — was measured against this kernel rather than guessed at.
+
+Probe: sparse clone of a recent vendor WLAN tree (LineageOS 23.0 branch of
+`ArianK16a/android_kernel_fairphone_sm7635-modules`, i.e. the same
+`qcom/opensource/wlan` layout), then
+
+```bash
+make -C <linux-7.3> M=$PWD/qcacld-3.0 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+     MODNAME=wlan WLAN_ROOT=$PWD/qcacld-3.0 \
+     CONFIG_QCA_CLD_WLAN_PROFILE=adrastea CONFIG_QCA_CLD_WLAN=m modules
+```
+
+Results, in order:
+
+1. the vendor `Kbuild` needs `WLAN_ROOT` + a device profile
+   (`configs/adrastea_defconfig` exists for this chip) and greps the kernel for
+   the downstream `kernel/sched/walt/walt.c`;
+2. with the profile set it compiles — and stops on a missing sibling repo
+   (`qcom/opensource/dataipa/config/dataipa_vendor.h`, the IPA offload glue);
+3. with `dataipa` added it stops on `linux/qcom-iommu-util.h`, a
+   **downstream-only kernel header** (Qualcomm's `drivers/iommu` helpers) that
+   does not exist in mainline.
+
+Static size measurements of the stack: **1.25 M lines of C** in
+`qcacld-3.0` + `qca-wifi-host-cmn` (5782 files), 167 distinct kernel headers
+included, of which **~20 do not exist in mainline 7.3**:
+
+```
+linux/ipa.h                linux/ipa_wdi3.h        linux/qcom-iommu-util.h
+linux/sched/walt.h         linux/sched/core_ctl.h  linux/minidump_tlv.h
+linux/wakelock.h           linux/qcn_sdio_al.h     linux/inet_lro.h
+linux/of_gpio.h            net/cnss2.h             net/cnss.h
+net/cnss_utils.h           net/cnss_logger.h       net/cnss_nl.h
+net/cnss_prealloc.h        soc/qcom/icnss2.h       soc/qcom/icnss.h
+soc/qcom/minidump.h        soc/qcom/boot_stats.h   linux/autoconf.h
+```
+
+plus ~40 known API-drift sites that will each be a compile error on 7.3
+(`hrtimer_init()` ×17 → `hrtimer_setup()`, `class_create()` ×7 → one argument,
+`setup_timer()` ×3, WEXT `iw_handler`/`wireless_send_event` ×10, …).
+
+Verdict: **not the cheaper path.** It is a multi-week port of a 1.25 M line
+vendor blob onto a kernel it was never written for, permanently out-of-tree,
+and it contradicts the point of this project (mainline kernel). Its only
+advantage — "this is what Android runs" — is already captured: the stock
+`icnss2` sources gave us the exact ADRASTEA start sequence (host_cap,
+msa_mem_info/msa_ready, cap, BDF) and the register/IRQ model we implemented in
+`ath11k`. Keep using it as *documentation*, not as build input.
+
 ## 3. What is installed on the device
 
 | Path | Content | Backup |
