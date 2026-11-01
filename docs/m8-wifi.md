@@ -604,6 +604,64 @@ Next step: implement the shadow-register write/read path for the UMAC range in
 Reference: `qca-wifi-host-cmn/hif/src/adrastea_reg_def.h` (register set) and
 `copy_engine.c`/`qmi_platform.c` behaviour above.
 
+### 2.14 Kernel `#82`: the stock window protocol does not exist on adrastea either
+
+`#82` implements the stock register-remap protocol literally (from
+`qca-wifi-host-cmn/hif/src/hif_io32.h`: `WINDOW_REG_ADDRESS 0x310C`,
+`WINDOW_ENABLE_BIT 0x40000000`, `WINDOW_SHIFT 19`, `WINDOW_VALUE_MASK 0x3F`,
+`WINDOW_START 0x80000`, `WINDOW_RANGE_MASK 0x7FFFF`, i.e. write
+`ENABLE | ((offset >> 19) & 0x3F)` to `membase + 0x310C`, then access
+`membase + 0x80000 + (offset & 0x7FFFF)`), with the verified-good CE block
+(`0x240000`..`0x260000`) kept direct, and `snoc_reg_mode` to switch between
+plain MMIO / selector-for-everything / CE-direct+selector.
+
+Result: the abort is now *inside the window select write itself*
+
+```
+pc : ath11k_ahb_window_write32_snoc+0x4c/0xa0
+x1 : 0000000000a34874   (offset)
+x3 : 0000000040000014   (ENABLE | window 0x14)
+x4 : ffff80008980310c   (ab->mem + 0x310C)
+Code: ... d50332bf (b9000083)      <- str w3, [x4]
+```
+
+The stock header explains why - for adrastea those registers are marked
+missing:
+
+```
+#define ADRASTEA_WINDOW_DATA_ADDRESS        MISSING
+#define ADRASTEA_WINDOW_READ_ADDR_ADDRESS   MISSING
+#define ADRASTEA_WINDOW_WRITE_ADDR_ADDRESS  MISSING
+```
+
+so the adrastea SNOC has no legacy window register at all, and there is no
+512 KiB..1 MiB remap window to select. What *does* exist in the host-visible
+part of the membase is the **SR_APSS shadow register block**:
+
+```
+SR_APSS_SHADOW_ADDRESS0..23  0x00030020 + 4*n
+SR_APSS_SHADOW_VALUE0..23    0x00032000 + 4*n
+SR_APSS_ADDRESS_VALID        0x000300E0
+SR_APSS_INVALID_ADDR_ACCESS / _DIRTY / _SR_CONTROL / _SR_INTERRUPT_CLEAR
+SR_APSS_FORCE_WAKE           0x00032060     SR_APSS_SW_SCRATCH 0x00032064
+SR_APSS_WCSSAON_SR_LSB       0x00032070
+```
+
+(address+value pairs plus a validity bitmap, i.e. a host->WCSS write port.)
+
+Two open questions for the next session, in order of value:
+
+1. **Does the host program the data-path rings at all on this variant?** On an
+   integrated-MAC SNOC design the WPSS firmware may own the SRNG
+   configuration and the host only needs the CE path (which works) plus the
+   ring addresses. If so, `ath11k_dp_alloc()`'s direct ring programming is the
+   wrong model here, and the port needs a different DP initialisation path
+   rather than a cleverer register window.
+2. If the host does own them, the SR_APSS shadow pairs are the documented
+   write port and their handshake has to be derived from the firmware that is
+   already running on the WPSS (`copy_engine.c` asserts while we poke around
+   the CE block, so it is watching).
+
 ## 3. What is installed on the device
 
 | Path | Content | Backup |

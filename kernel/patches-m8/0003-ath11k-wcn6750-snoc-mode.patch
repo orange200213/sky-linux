@@ -19,7 +19,7 @@ index ec5bf5c9f..b68716227 100644
 @@ -648,7 +649,16 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
  		irq_idx = ATH11K_IRQ_CE0_OFFSET + i;
 diff --git a/drivers/net/wireless/ath/ath11k/ahb.c b/drivers/net/wireless/ath/ath11k/ahb.c
-index ec5bf5c9f..7716e6853 100644
+index ec5bf5c9f..7bb8cb90a 100644
 --- a/drivers/net/wireless/ath/ath11k/ahb.c
 +++ b/drivers/net/wireless/ath/ath11k/ahb.c
 @@ -44,6 +44,18 @@ MODULE_DEVICE_TABLE(of, ath11k_ahb_of_match);
@@ -94,7 +94,7 @@ index ec5bf5c9f..7716e6853 100644
  	/* Configure external interrupts */
  	ret = ath11k_ahb_config_ext_irq(ab);
  	if (ret) {
-@@ -806,6 +839,43 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_ipq8074 = {
+@@ -806,6 +839,91 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_ipq8074 = {
  	.power_up = ath11k_ahb_power_up,
  };
  
@@ -114,18 +114,66 @@ index ec5bf5c9f..7716e6853 100644
 +						   user_base_data, base_vector);
 +}
 +
-+/* The ADRASTEA/SNOC variant exposes the whole register block in the DT
-+ * "membase", so the PCI window arithmetic must not be applied.
++/* SNOC register access modes (derived from the stock driver):
++ * 0 = plain MMIO, 1 = stock "PCIE_REMAP_1M_BAR_CTRL" selector window,
++ * 2 = CE block direct + selector window for everything above 512 KiB
 + */
++static uint ath11k_snoc_reg_mode = 2;
++module_param_named(snoc_reg_mode, ath11k_snoc_reg_mode, uint, 0644);
++MODULE_PARM_DESC(snoc_reg_mode, "0 mmio, 1 selector window, 2 CE direct + selector");
++
++#define ATH11K_SNOC_WINDOW_START	0x80000
++#define ATH11K_SNOC_WINDOW_RANGE_MASK	0x7ffff
++#define ATH11K_SNOC_WINDOW_REG		0x310c
++#define ATH11K_SNOC_WINDOW_ENABLE	0x40000000
++#define ATH11K_SNOC_CE_START		0x240000
++#define ATH11K_SNOC_CE_END		0x260000
++
++static bool ath11k_ahb_snoc_windowed(struct ath11k_base *ab, u32 offset)
++{
++	if (ath11k_snoc_reg_mode == 0)
++		return false;
++
++	if (offset < ATH11K_SNOC_WINDOW_START)
++		return false;
++
++	if (ath11k_snoc_reg_mode == 2 && offset >= ATH11K_SNOC_CE_START &&
++	    offset < ATH11K_SNOC_CE_END)
++		return false;
++
++	return true;
++}
++
++static void ath11k_ahb_snoc_select_window(struct ath11k_base *ab, u32 offset)
++{
++	u32 window = (offset >> 19) & 0x3f;
++
++	iowrite32(ATH11K_SNOC_WINDOW_ENABLE | window,
++		  ab->mem + ATH11K_SNOC_WINDOW_REG);
++	ioread32(ab->mem + ATH11K_SNOC_WINDOW_REG);
++}
++
 +static void ath11k_ahb_window_write32_snoc(struct ath11k_base *ab, u32 offset,
 +					   u32 value)
 +{
-+	iowrite32(value, ab->mem + offset);
++	if (!ath11k_ahb_snoc_windowed(ab, offset)) {
++		iowrite32(value, ab->mem + offset);
++		return;
++	}
++
++	ath11k_ahb_snoc_select_window(ab, offset);
++	iowrite32(value, ab->mem + ATH11K_SNOC_WINDOW_START +
++		  (offset & ATH11K_SNOC_WINDOW_RANGE_MASK));
 +}
 +
 +static u32 ath11k_ahb_window_read32_snoc(struct ath11k_base *ab, u32 offset)
 +{
-+	return ioread32(ab->mem + offset);
++	if (!ath11k_ahb_snoc_windowed(ab, offset))
++		return ioread32(ab->mem + offset);
++
++	ath11k_ahb_snoc_select_window(ab, offset);
++	return ioread32(ab->mem + ATH11K_SNOC_WINDOW_START +
++			(offset & ATH11K_SNOC_WINDOW_RANGE_MASK));
 +}
 +
 +static const struct ath11k_pci_ops ath11k_ahb_pci_ops_snoc = {
@@ -138,7 +186,7 @@ index ec5bf5c9f..7716e6853 100644
  static const struct ath11k_hif_ops ath11k_ahb_hif_ops_wcn6750 = {
  	.start = ath11k_pcic_start,
  	.stop = ath11k_pcic_stop,
-@@ -815,7 +885,7 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_wcn6750 = {
+@@ -815,7 +933,7 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_wcn6750 = {
  	.irq_enable = ath11k_pcic_ext_irq_enable,
  	.irq_disable = ath11k_pcic_ext_irq_disable,
  	.get_msi_address =  ath11k_pcic_get_msi_address,
@@ -147,7 +195,7 @@ index ec5bf5c9f..7716e6853 100644
  	.map_service_to_pipe = ath11k_pcic_map_service_to_pipe,
  	.power_down = ath11k_ahb_power_down,
  	.power_up = ath11k_ahb_power_up,
-@@ -932,6 +1002,28 @@ static int ath11k_ahb_setup_resources(struct ath11k_base *ab)
+@@ -932,6 +1050,28 @@ static int ath11k_ahb_setup_resources(struct ath11k_base *ab)
  	if (ab->hw_params.hybrid_bus_type)
  		return ath11k_ahb_setup_msi_resources(ab);
  
@@ -176,7 +224,7 @@ index ec5bf5c9f..7716e6853 100644
  	mem = devm_platform_get_and_ioremap_resource(pdev, 0, &mem_res);
  	if (IS_ERR(mem)) {
  		dev_err(&pdev->dev, "ioremap error\n");
-@@ -940,6 +1032,9 @@ static int ath11k_ahb_setup_resources(struct ath11k_base *ab)
+@@ -940,6 +1080,9 @@ static int ath11k_ahb_setup_resources(struct ath11k_base *ab)
  
  	ab->mem = mem;
  	ab->mem_len = resource_size(mem_res);
@@ -186,7 +234,7 @@ index ec5bf5c9f..7716e6853 100644
  
  	return 0;
  }
-@@ -1191,6 +1286,40 @@ static int ath11k_ahb_probe(struct platform_device *pdev)
+@@ -1191,6 +1334,40 @@ static int ath11k_ahb_probe(struct platform_device *pdev)
  	if (ret)
  		goto err_core_free;
  
