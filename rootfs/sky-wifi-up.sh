@@ -12,6 +12,28 @@ log() { echo "sky-wifi: $*" >> "$LOG"; }
 
 log "start"
 
+# Optional ath11k parameter overrides for this boot (see docs/m8-wifi.md):
+#   bdf_chunk / bdf_file_id / bdf_total_full / msa_handshake / regdb_download
+if [ -r /etc/sky-wifi-params ]; then
+	while read -r line; do
+		case "$line" in
+		''|'#'*) continue ;;
+		esac
+		k=${line%%=*}
+		v=${line#*=}
+		for d in /sys/module/ath11k/parameters /sys/module/ath11k_ahb/parameters \
+			 /sys/module/ath11k_pci/parameters; do
+			[ -w "$d/$k" ] && echo "$v" > "$d/$k"
+		done
+		if [ -w "/sys/module/ath11k/parameters/$k" ] ||
+		   [ -w "/sys/module/ath11k_ahb/parameters/$k" ]; then
+			log "param $k=$v"
+		else
+			log "param $k not available"
+		fi
+	done < /etc/sky-wifi-params
+fi
+
 # --- 1. WPSS remoteproc --------------------------------------------------
 i=0
 state=
