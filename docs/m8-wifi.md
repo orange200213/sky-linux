@@ -700,6 +700,52 @@ bases/windows and reads one known register from each (the kernel survives the
 external aborts, as the last runs show) so the real location of the UMAC /
 WBM / REO / TCL block is found in a single boot instead of one guess per flash.
 
+### 2.16 `#84` probe and where the SNOC path stands
+
+`#84` added a fault-tolerant register probe, but it ran inside the probe path
+and the bind is issued by `/init` (PID 1), so the first dead address killed
+init: `Internal error: synchronous external abort` followed by
+`Kernel panic - not syncing: Attempted to kill init`. Device fell back to
+`#83`; the probe is now behind `ath11k_snoc_probe` (default off) and must be
+moved to a workqueue before it is used again.
+
+Status of the SNOC port after ~24 hardware builds:
+
+| piece | state |
+|---|---|
+| WPSS start, split-MDT fw, smp2p | works |
+| WLFW QMI: ind_register, host_cap + ddr_range, msa_info/msa_ready, target cap, regdb (19 KB) + BDF (26 KB) download, cal report | works |
+| firmware reaches "driver init" | works |
+| CE0..CE11 rings (registers at membase+0x240000) | works |
+| DP rings (UMAC/WBM/REO/TCL) | **register block not reachable** - not at membase+0xa3xxxx, not through the stock PCI-style window map (0x80000/0x100000/0x180000 all abort), not at 16 MiB |
+| extended interrupts / NAPI / WMI-HTC start | not attempted yet |
+
+So the remaining gap is not a single bug: the WCSS data-path register block has
+to be found (SR_APSS shadow port at 0x30020/0x32000 is the only documented
+write path left) and then the DP, ext-IRQ and WMI start-up have to be brought
+up on top of it. That is weeks of work with a live risk of dead ends, because
+the access mechanism is undocumented outside Qualcomm.
+
+### 2.17 Decision: SNOC vs out-of-tree qcacld
+
+Two honest options for "WiFi working on this phone":
+
+1. **Keep porting ath11k SNOC** (mainline stays clean). Remaining: locate the
+   DP register block or implement the SR_APSS shadow port, then DP + ext-IRQ +
+   WMI start-up, then a working scan/assoc path. Estimate: weeks, unbounded
+   risk on the register access mechanism.
+2. **Run the vendor stack** where it was written: `icnss2` + `qcacld-3.0` on the
+   stock 5.10/6.1 kernel. That stack is what ships on this device and it
+   already contains the SNOC DP/ring/shadow handling we are reverse
+   engineering. It means giving up the mainline kernel for WiFi.
+
+Porting `qcacld-3.0` (1.25 M lines, ~20 downstream-only headers such as
+`linux/ipa.h`, `linux/qcom-iommu-util.h`, `linux/sched/walt.h`, `net/cnss*.h`,
+`soc/qcom/icnss2.h`, plus `dataipa` and the `wlan/platform` repos) onto 7.3 is
+the worst of both worlds: the same scale of work as (1) *and* permanently
+out-of-tree. If the goal ever changes from "mainline WiFi" to "WiFi", option 2
+on the vendor kernel is the shortest path; it is not a shortcut for mainline.
+
 ## 3. What is installed on the device
 
 | Path | Content | Backup |

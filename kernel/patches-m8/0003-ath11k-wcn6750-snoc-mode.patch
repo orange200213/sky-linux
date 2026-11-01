@@ -19,10 +19,10 @@ index ec5bf5c9f..b68716227 100644
 @@ -648,7 +649,16 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
  		irq_idx = ATH11K_IRQ_CE0_OFFSET + i;
 diff --git a/drivers/net/wireless/ath/ath11k/ahb.c b/drivers/net/wireless/ath/ath11k/ahb.c
-index ec5bf5c9f..b8fff7009 100644
+index ec5bf5c9f..e2ec18f09 100644
 --- a/drivers/net/wireless/ath/ath11k/ahb.c
 +++ b/drivers/net/wireless/ath/ath11k/ahb.c
-@@ -44,6 +44,18 @@ MODULE_DEVICE_TABLE(of, ath11k_ahb_of_match);
+@@ -44,6 +44,22 @@ MODULE_DEVICE_TABLE(of, ath11k_ahb_of_match);
  
  #define ATH11K_IRQ_CE0_OFFSET 4
  
@@ -34,6 +34,10 @@ index ec5bf5c9f..b8fff7009 100644
 +module_param_named(snoc_membase_mib, ath11k_snoc_membase_mib, uint, 0644);
 +MODULE_PARM_DESC(snoc_membase_mib, "SNOC mode: membase window size in MiB (0 = DT size)");
 +
++static bool ath11k_snoc_probe;
++module_param_named(snoc_probe, ath11k_snoc_probe, bool, 0644);
++MODULE_PARM_DESC(snoc_probe, "probe WCSS register bases at bind (dangerous)");
++
 +static bool ath11k_snoc_fixed_mem = true;
 +module_param_named(snoc_fixed_mem, ath11k_snoc_fixed_mem, bool, 0644);
 +MODULE_PARM_DESC(snoc_fixed_mem, "SNOC mode: firmware owns its MSA region");
@@ -41,7 +45,7 @@ index ec5bf5c9f..b8fff7009 100644
  static const char *irq_name[ATH11K_IRQ_NUM_MAX] = {
  	"misc-pulse1",
  	"misc-latch",
-@@ -469,7 +481,9 @@ static void ath11k_ahb_free_irq(struct ath11k_base *ab)
+@@ -469,7 +485,9 @@ static void ath11k_ahb_free_irq(struct ath11k_base *ab)
  		return ath11k_pcic_free_irq(ab);
  
  	ath11k_ahb_free_ce_irqs(ab, ab->hw_params.ce_count);
@@ -52,7 +56,7 @@ index ec5bf5c9f..b8fff7009 100644
  }
  
  static void ath11k_ahb_ce_tasklet(struct tasklet_struct *t)
-@@ -632,6 +646,7 @@ static int ath11k_ahb_config_ext_irq(struct ath11k_base *ab)
+@@ -632,6 +650,7 @@ static int ath11k_ahb_config_ext_irq(struct ath11k_base *ab)
  
  static int ath11k_ahb_config_irq(struct ath11k_base *ab)
  {
@@ -60,7 +64,7 @@ index ec5bf5c9f..b8fff7009 100644
  	int irq, irq_idx, i;
  	int ret;
  
-@@ -648,7 +663,16 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
+@@ -648,7 +667,16 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
  		irq_idx = ATH11K_IRQ_CE0_OFFSET + i;
  
  		tasklet_setup(&ce_pipe->intr_tq, ath11k_ahb_ce_tasklet);
@@ -78,7 +82,7 @@ index ec5bf5c9f..b8fff7009 100644
  		ret = request_irq(irq, ath11k_ahb_ce_interrupt_handler,
  				  IRQF_TRIGGER_RISING, irq_name[irq_idx],
  				  ce_pipe);
-@@ -661,6 +685,15 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
+@@ -661,6 +689,15 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
  		ab->irq_num[irq_idx] = irq;
  	}
  
@@ -94,7 +98,7 @@ index ec5bf5c9f..b8fff7009 100644
  	/* Configure external interrupts */
  	ret = ath11k_ahb_config_ext_irq(ab);
  	if (ret) {
-@@ -806,6 +839,157 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_ipq8074 = {
+@@ -806,6 +843,200 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_ipq8074 = {
  	.power_up = ath11k_ahb_power_up,
  };
  
@@ -242,6 +246,49 @@ index ec5bf5c9f..b8fff7009 100644
 +			(offset & ATH11K_SNOC_WINDOW_RANGE_MASK));
 +}
 +
++/* one-shot bring-up probe: find where the WCSS register blocks really live.
++ * Every access goes through copy_from_kernel_nofault() so a dead address is
++ * reported instead of taking the whole worker down.
++ */
++static void ath11k_ahb_snoc_probe_regs(struct ath11k_base *ab)
++{
++	static const u32 offs[] = {
++		0x0, 0x30000, 0x30064, 0x32064, 0x240000, 0x240038,
++		0x80000, 0x100000, 0x180000, 0x200000, 0x400000,
++		0x600000, 0x800000, 0xa00000, 0xa34874, 0xc00000,
++		0x1000000,
++	};
++	struct platform_device *pdev = ab->pdev;
++	struct resource *res;
++	phys_addr_t base;
++	int i;
++
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!res)
++		return;
++
++	base = res->start;
++
++	for (i = 0; i < ARRAY_SIZE(offs); i++) {
++		phys_addr_t pa = (base + offs[i]) & PAGE_MASK;
++		u32 skip = (base + offs[i]) & ~PAGE_MASK;
++		void __iomem *va;
++		u32 val = 0;
++		long ret;
++
++		va = ioremap(pa, PAGE_SIZE);
++		if (!va) {
++			ath11k_info(ab, "probe +%#x: ioremap failed\n", offs[i]);
++			continue;
++		}
++
++		ret = copy_from_kernel_nofault(&val, va + skip, sizeof(val));
++		ath11k_info(ab, "probe +%#x (%pa): %s val=%#x\n", offs[i], &pa,
++			    ret ? "DEAD" : "live", val);
++		iounmap(va);
++	}
++}
++
 +static const struct ath11k_pci_ops ath11k_ahb_pci_ops_snoc = {
 +	.wakeup = NULL,
 +	.get_msi_irq = ath11k_ahb_get_msi_irq_wcn6750,
@@ -252,7 +299,7 @@ index ec5bf5c9f..b8fff7009 100644
  static const struct ath11k_hif_ops ath11k_ahb_hif_ops_wcn6750 = {
  	.start = ath11k_pcic_start,
  	.stop = ath11k_pcic_stop,
-@@ -815,7 +999,7 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_wcn6750 = {
+@@ -815,7 +1046,7 @@ static const struct ath11k_hif_ops ath11k_ahb_hif_ops_wcn6750 = {
  	.irq_enable = ath11k_pcic_ext_irq_enable,
  	.irq_disable = ath11k_pcic_ext_irq_disable,
  	.get_msi_address =  ath11k_pcic_get_msi_address,
@@ -261,7 +308,7 @@ index ec5bf5c9f..b8fff7009 100644
  	.map_service_to_pipe = ath11k_pcic_map_service_to_pipe,
  	.power_down = ath11k_ahb_power_down,
  	.power_up = ath11k_ahb_power_up,
-@@ -932,6 +1116,28 @@ static int ath11k_ahb_setup_resources(struct ath11k_base *ab)
+@@ -932,6 +1163,28 @@ static int ath11k_ahb_setup_resources(struct ath11k_base *ab)
  	if (ab->hw_params.hybrid_bus_type)
  		return ath11k_ahb_setup_msi_resources(ab);
  
@@ -290,7 +337,7 @@ index ec5bf5c9f..b8fff7009 100644
  	mem = devm_platform_get_and_ioremap_resource(pdev, 0, &mem_res);
  	if (IS_ERR(mem)) {
  		dev_err(&pdev->dev, "ioremap error\n");
-@@ -940,6 +1146,9 @@ static int ath11k_ahb_setup_resources(struct ath11k_base *ab)
+@@ -940,6 +1193,9 @@ static int ath11k_ahb_setup_resources(struct ath11k_base *ab)
  
  	ab->mem = mem;
  	ab->mem_len = resource_size(mem_res);
@@ -300,7 +347,7 @@ index ec5bf5c9f..b8fff7009 100644
  
  	return 0;
  }
-@@ -1191,6 +1400,40 @@ static int ath11k_ahb_probe(struct platform_device *pdev)
+@@ -1191,10 +1447,51 @@ static int ath11k_ahb_probe(struct platform_device *pdev)
  	if (ret)
  		goto err_core_free;
  
@@ -339,6 +386,17 @@ index ec5bf5c9f..b8fff7009 100644
 +	}
 +
  	ret = ath11k_ahb_setup_resources(ab);
+ 	if (ret)
+ 		goto err_core_free;
+ 
++	/* NOTE: must not run in the probe path: the bind is issued from PID 1,
++	 * so a dead address there kills init and panics the box.  Kept behind
++	 * a parameter for a future workqueue based probe.
++	 */
++	if (ath11k_snoc_probe && ath11k_ahb_priv(ab)->snoc_ahb)
++		ath11k_ahb_snoc_probe_regs(ab);
++
+ 	ret = ath11k_ahb_ce_remap(ab);
  	if (ret)
  		goto err_core_free;
 diff --git a/drivers/net/wireless/ath/ath11k/ahb.h b/drivers/net/wireless/ath/ath11k/ahb.h
