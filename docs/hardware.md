@@ -32,7 +32,7 @@ and from running Linux on the device.
 
 | Item | Value |
 |------|-------|
-| Panel | 1080×2460 AMOLED, Xiaomi `m19` (DSI) |
+| Panel | 1080×2460 IPS LCD, Xiaomi `m19` (DSI) |
 | Framebuffer left by ABL | base `0xb8000000`, stride `0x10E0` (4320), `x8r8g8b8` |
 | DPU | SM4450 display subsystem `@0xae00000`, DPU 8.6, IRQ 83 |
 | DSI | controller v2.6, PHY v4.3 |

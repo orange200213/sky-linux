@@ -87,7 +87,7 @@ fastboot flash boot_a /path/to/stock/boot.img
 |------|-------|
 | SoC | Qualcomm SM4450 (ravelin), 4×A55 + 4×A78 |
 | RAM | 4/6/8 GB LPDDR4X, low bank at `0x80000000` |
-| Display | 1080×2460 AMOLED, `m19` panel, DSI, KTD3136 backlight |
+| Display | 1080×2460 LCD, `m19` panel, DSI, KTD3136 backlight |
 | Framebuffer left by ABL | `0xb8000000`, stride 4320, 43 MiB "splash region" |
 | Storage | UFS 4.0, 2 lanes, `/dev/sda` = 117 GiB LUN with `userdata` (108 GiB) |
 | USB | dwc3 + SNPS femto HS PHY (no USB3 here) |
