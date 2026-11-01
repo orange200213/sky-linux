@@ -288,6 +288,60 @@ SID 0x4c0, four rails) plus `qcom,rproc`, the wlan smp2p state,
 `qcom,snoc-ahb` and `status = "okay"`, with the four rails marked
 `regulator-always-on` (ath11k never touches regulators).
 
+### 2.7 Phase 1 experiment log (kernels #63 … #71)
+
+All of these are on-hardware results; the WLFW start sequence is the only thing
+that changed between builds.
+
+| Build | Change | Result |
+|---|---|---|
+| `#63` | membase + per-CE IRQs + `msa_mem_info`/`msa_ready` | `msa 0x82a00000+0x300000, 2 region(s)` ✅, then `host capability request failed: 1 90` (`INCOMPATIBLE_STATE`) |
+| `#64` | skip `host_cap` | target cap OK (`chip_id 0x4130 …`), `board file download request failed: 1 19` |
+| `#66` | `bdf_chunk` / `bdf_file_id` / `bdf_total_full` / `regdb_download` / `msa_handshake` knobs | chunk 2048 and `file_id` 0 still error 19 → not a message-length or file-id problem |
+| `#67` | `host_cap` before MSA (ath10k order) + fix NULL deref in `ath11k_ahb_free_irq()` (SNOC never sets the ext IRQ groups, `unbind` crashed) | BDF still error 19 |
+| `#68` | register the `MSA_READY_IND` (0x2B) handler and request it in `ind_register` | the indication really arrives (`waiting for the MSA ready indication` → BDF 16 ms later), BDF still error 19 |
+| `#69` | `snoc_bdf_download=n` | firmware stays silent afterwards → the BDF download really is required |
+| `#70` | `ind_register` set copied from the stock icnss2 ADRASTEA branch (`fw_ready` + `pin_connect_result` + `msa_ready`, no `cal_done` / `fw_init_done`) | BDF still error 19 |
+| `#71` | `snoc_fixed_mem=n` → firmware asks for DDR memory over QMI | **new behaviour**: `qmi respond memory request failed: 1 48` (`QMI_ERR_INVALID_ARG`), and the BDF attempt then returns **90** instead of 19 → the state machine *did* move |
+
+The firmware itself documents the gate —
+
+```
+qmi_platform.c:qmi_plat_check_state: error - received BDF DOWNLOAD REQ at wrong state %d
+qmi_platform.c:QMI Platform: BDF download REQ received, seg_id 0x%x
+```
+
+— i.e. error 19 is not a bad TLV, the firmware refuses the *message order*.
+The two remaining candidate sequences are:
+
+1. **Firmware owns the MSA, host never asks for memory** (stock icnss2 ADRASTEA
+   branch). Everything up to and including `cap` matches the vendor code and the
+   `MSA_READY_IND` handshake is fine, yet `BDF DOWNLOAD` is still refused. Next
+   thing to try: log the requested/returned chunks and diff the remaining
+   `ind_register` bits (`daemon_support`, `respond_get_info`, `qdss`), and the
+   `wlan_en_delay`/temperature step the vendor does for WCN6750 only.
+2. **Host provides DDR memory** (`fixed_fw_mem = false`). The firmware
+   immediately sends `REQUEST_MEM_IND`; our `RESPOND_MEM_REQ` is rejected with
+   `INVALID_ARG`, most likely because the request does not fit the 3 MiB
+   `wlan_msa_mem` carve-out (the chunk sizes are only logged with
+   `ATH11K_DBG_QMI`, which this kernel has compiled out). If this path is taken,
+   the host also has to map the region into the WLAN IOMMU
+   (`ath11k_ahb_fw_resources_init()` + a `wifi-firmware` child node as in
+   `arch/arm64/boot/dts/qcom/kodiak.dtsi`), so it is the larger of the two.
+
+Both paths are switchable at run time (kernel `#71`), so the next session can
+iterate without reflashing:
+
+```
+/sys/module/ath11k/parameters/{msa_handshake,host_cap? snoc_host_cap,
+    snoc_bdf_wait_ind,snoc_bdf_download,snoc_bdf_delay_ms,snoc_bdf_type,
+    snoc_ind_vendor,regdb_download,bdf_chunk,bdf_file_id,bdf_total_full}
+/sys/module/ath11k_ahb/parameters/snoc_fixed_mem
+```
+
+with `/etc/sky-wifi-params` (`key=value` per line) applied by
+`rootfs/sky-wifi-up.sh` at boot, and `sysrq-b` to reboot.
+
 ## 3. What is installed on the device
 
 | Path | Content | Backup |

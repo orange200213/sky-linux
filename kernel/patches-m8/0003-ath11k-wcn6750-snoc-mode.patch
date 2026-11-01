@@ -18,6 +18,45 @@ index ec5bf5c9f..b68716227 100644
  
 @@ -648,7 +649,16 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
  		irq_idx = ATH11K_IRQ_CE0_OFFSET + i;
+diff --git a/drivers/net/wireless/ath/ath11k/ahb.c b/drivers/net/wireless/ath/ath11k/ahb.c
+index ec5bf5c9f..d7542c140 100644
+--- a/drivers/net/wireless/ath/ath11k/ahb.c
++++ b/drivers/net/wireless/ath/ath11k/ahb.c
+@@ -44,6 +44,13 @@ MODULE_DEVICE_TABLE(of, ath11k_ahb_of_match);
+ 
+ #define ATH11K_IRQ_CE0_OFFSET 4
+ 
++/* SNOC variant: does the firmware own its MSA (fixed_fw_mem) or does it ask
++ * the host for DDR memory over QMI?  Both flows exist in the WLFW protocol.
++ */
++static bool ath11k_snoc_fixed_mem = true;
++module_param_named(snoc_fixed_mem, ath11k_snoc_fixed_mem, bool, 0644);
++MODULE_PARM_DESC(snoc_fixed_mem, "SNOC mode: firmware owns its MSA region");
++
+ static const char *irq_name[ATH11K_IRQ_NUM_MAX] = {
+ 	"misc-pulse1",
+ 	"misc-latch",
+@@ -469,7 +476,9 @@ static void ath11k_ahb_free_irq(struct ath11k_base *ab)
+ 		return ath11k_pcic_free_irq(ab);
+ 
+ 	ath11k_ahb_free_ce_irqs(ab, ab->hw_params.ce_count);
+-	ath11k_ahb_free_ext_irq(ab);
++	/* the SNOC variant never configures the extended interrupts */
++	if (!ath11k_ahb_priv(ab)->snoc_ahb)
++		ath11k_ahb_free_ext_irq(ab);
+ }
+ 
+ static void ath11k_ahb_ce_tasklet(struct tasklet_struct *t)
+@@ -632,6 +641,7 @@ static int ath11k_ahb_config_ext_irq(struct ath11k_base *ab)
+ 
+ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
+ {
++	struct ath11k_ahb *ab_ahb = ath11k_ahb_priv(ab);
+ 	int irq, irq_idx, i;
+ 	int ret;
+ 
+@@ -648,7 +658,16 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
+ 		irq_idx = ATH11K_IRQ_CE0_OFFSET + i;
  
  		tasklet_setup(&ce_pipe->intr_tq, ath11k_ahb_ce_tasklet);
 -		irq = platform_get_irq_byname(ab->pdev, irq_name[irq_idx]);
@@ -34,7 +73,7 @@ index ec5bf5c9f..b68716227 100644
  		ret = request_irq(irq, ath11k_ahb_ce_interrupt_handler,
  				  IRQF_TRIGGER_RISING, irq_name[irq_idx],
  				  ce_pipe);
-@@ -661,6 +671,15 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
+@@ -661,6 +680,15 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
  		ab->irq_num[irq_idx] = irq;
  	}
  
@@ -50,7 +89,7 @@ index ec5bf5c9f..b68716227 100644
  	/* Configure external interrupts */
  	ret = ath11k_ahb_config_ext_irq(ab);
  	if (ret) {
-@@ -1191,6 +1210,17 @@ static int ath11k_ahb_probe(struct platform_device *pdev)
+@@ -1191,6 +1219,18 @@ static int ath11k_ahb_probe(struct platform_device *pdev)
  	if (ret)
  		goto err_core_free;
  
@@ -63,6 +102,7 @@ index ec5bf5c9f..b68716227 100644
 +		ath11k_info(ab, "snoc mode: membase registers, per-CE interrupts\n");
 +		ath11k_ahb_priv(ab)->snoc_ahb = true;
 +		ab->hw_params.hybrid_bus_type = false;
++		ab->hw_params.fixed_fw_mem = ath11k_snoc_fixed_mem;
 +	}
 +
  	ret = ath11k_ahb_setup_resources(ab);
@@ -84,13 +124,80 @@ index 8c1eb1e8e..e48807bbe 100644
  
  static inline struct ath11k_ahb *ath11k_ahb_priv(struct ath11k_base *ab)
 diff --git a/drivers/net/wireless/ath/ath11k/qmi.c b/drivers/net/wireless/ath/ath11k/qmi.c
-index 7dc07339b..916703427 100644
+index 7dc07339b..d5d18ffa2 100644
 --- a/drivers/net/wireless/ath/ath11k/qmi.c
 +++ b/drivers/net/wireless/ath/ath11k/qmi.c
-@@ -1705,6 +1705,206 @@ static const struct qmi_elem_info qmi_wlfw_fw_init_done_ind_msg_v01_ei[] = {
+@@ -26,6 +26,59 @@
+ 
+ bool ath11k_cold_boot_cal = 1;
+ EXPORT_SYMBOL(ath11k_cold_boot_cal);
++/* BDF download knobs, used while bringing up the SNOC ("icnss") variant:
++ * the stock firmware rejects the upstream message with QMI error 19.
++ */
++static uint ath11k_bdf_chunk = QMI_WLANFW_MAX_DATA_SIZE_V01;
++module_param_named(bdf_chunk, ath11k_bdf_chunk, uint, 0644);
++MODULE_PARM_DESC(bdf_chunk, "BDF download segment size in bytes");
++
++static int ath11k_bdf_file_id = -1;
++module_param_named(bdf_file_id, ath11k_bdf_file_id, int, 0644);
++MODULE_PARM_DESC(bdf_file_id, "override the BDF download file_id (-1 = board_id)");
++
++static bool ath11k_bdf_total_full;
++module_param_named(bdf_total_full, ath11k_bdf_total_full, bool, 0644);
++MODULE_PARM_DESC(bdf_total_full,
++		 "send the whole file size as total_size instead of the remaining bytes");
++
++/* where to send host_cap in SNOC mode: 0 = never, 1 = before the MSA
++ * handshake, 2 = after it (upstream order)
++ */
++static uint ath11k_snoc_host_cap = 1;
++module_param_named(snoc_host_cap, ath11k_snoc_host_cap, uint, 0644);
++MODULE_PARM_DESC(snoc_host_cap, "0=never, 1=before MSA, 2=after MSA");
++
++static bool ath11k_snoc_ind_vendor = true;
++module_param_named(snoc_ind_vendor, ath11k_snoc_ind_vendor, bool, 0644);
++MODULE_PARM_DESC(snoc_ind_vendor,
++		 "use the stock icnss2 ADRASTEA indication set in SNOC mode");
++
++static bool ath11k_snoc_bdf_download = true;
++module_param_named(snoc_bdf_download, ath11k_snoc_bdf_download, bool, 0644);
++MODULE_PARM_DESC(snoc_bdf_download, "download BDF/regdb at all in SNOC mode");
++
++static uint ath11k_snoc_bdf_delay_ms;
++module_param_named(snoc_bdf_delay_ms, ath11k_snoc_bdf_delay_ms, uint, 0644);
++MODULE_PARM_DESC(snoc_bdf_delay_ms, "delay before the SNOC BDF download");
++
++static int ath11k_snoc_bdf_type = -1;
++module_param_named(snoc_bdf_type, ath11k_snoc_bdf_type, int, 0644);
++MODULE_PARM_DESC(snoc_bdf_type, "override bdf_type (-1 = default)");
++
++static bool ath11k_snoc_bdf_wait_ind = true;
++module_param_named(snoc_bdf_wait_ind, ath11k_snoc_bdf_wait_ind, bool, 0644);
++MODULE_PARM_DESC(snoc_bdf_wait_ind,
++		 "download the BDF only after the firmware's MSA ready indication");
++
++static bool ath11k_msa_handshake = true;
++module_param_named(msa_handshake, ath11k_msa_handshake, bool, 0644);
++MODULE_PARM_DESC(msa_handshake, "send the WLFW MSA info/ready handshake");
++
++static bool ath11k_regdb_download = true;
++module_param_named(regdb_download, ath11k_regdb_download, bool, 0644);
++MODULE_PARM_DESC(regdb_download, "download regdb over QMI");
++
+ module_param_named(cold_boot_cal, ath11k_cold_boot_cal, bool, 0644);
+ MODULE_PARM_DESC(cold_boot_cal,
+ 		 "Decrease the channel switch time but increase the driver load time (Default: true)");
+@@ -1705,6 +1758,213 @@ static const struct qmi_elem_info qmi_wlfw_fw_init_done_ind_msg_v01_ei[] = {
  	},
  };
  
++static const struct qmi_elem_info qmi_wlfw_msa_ready_ind_msg_v01_ei[] = {
++	{
++		.data_type = QMI_EOTI,
++		.array_type = NO_ARRAY,
++	},
++};
++
 +static const struct qmi_elem_info wlfw_memory_region_info_s_v01_ei[] = {
 +	{
 +		.data_type      = QMI_UNSIGNED_8_BYTE,
@@ -294,7 +401,105 @@ index 7dc07339b..916703427 100644
  /* clang stack usage explodes if this is inlined */
  static noinline_for_stack
  int ath11k_qmi_host_cap_send(struct ath11k_base *ab)
-@@ -3000,10 +3200,29 @@ static int ath11k_qmi_event_server_arrive(struct ath11k_qmi *qmi)
+@@ -1817,6 +2077,27 @@ static int ath11k_qmi_fw_ind_register_send(struct ath11k_base *ab)
+ 	req->fw_init_done_enable_valid = 1;
+ 	req->fw_init_done_enable = 1;
+ 
++	/* the SNOC variant only allows the BDF download after the firmware has
++	 * signalled MSA ready, and it only sends that indication if asked for
++	 */
++	if (ath11k_qmi_is_snoc(ab)) {
++		req->msa_ready_enable_valid = 1;
++		req->msa_ready_enable = 1;
++
++		/* the stock icnss2 ADRASTEA sequence asks for fw_ready,
++		 * pin_connect_result and msa_ready only - no cold-boot-cal and no
++		 * fw_init_done indications
++		 */
++		if (ath11k_snoc_ind_vendor) {
++			req->pin_connect_result_enable_valid = 1;
++			req->pin_connect_result_enable = 1;
++			req->cal_done_enable_valid = 0;
++			req->cal_done_enable = 0;
++			req->fw_init_done_enable_valid = 0;
++			req->fw_init_done_enable = 0;
++		}
++	}
++
+ 	req->pin_connect_result_enable_valid = 0;
+ 	req->pin_connect_result_enable = 0;
+ 
+@@ -2304,6 +2585,7 @@ static int ath11k_qmi_load_file_target_mem(struct ath11k_base *ab,
+ 	void __iomem *bdf_addr = NULL;
+ 	int ret = 0;
+ 	u32 remaining = len;
++	u32 chunk;
+ 
+ 	req = kzalloc_obj(*req);
+ 	if (!req)
+@@ -2323,18 +2605,22 @@ static int ath11k_qmi_load_file_target_mem(struct ath11k_base *ab,
+ 	while (remaining) {
+ 		req->valid = 1;
+ 		req->file_id_valid = 1;
+-		req->file_id = ab->qmi.target.board_id;
++		req->file_id = ath11k_bdf_file_id < 0 ?
++			       ab->qmi.target.board_id : ath11k_bdf_file_id;
+ 		req->total_size_valid = 1;
+-		req->total_size = remaining;
++		req->total_size = ath11k_bdf_total_full ? len : remaining;
+ 		req->seg_id_valid = 1;
+ 		req->data_valid = 1;
+-		req->bdf_type = type;
++		req->bdf_type = ath11k_snoc_bdf_type >= 0 ?
++				ath11k_snoc_bdf_type : type;
+ 		req->bdf_type_valid = 1;
+ 		req->end_valid = 1;
+ 		req->end = 0;
+ 
+-		if (remaining > QMI_WLANFW_MAX_DATA_SIZE_V01) {
+-			req->data_len = QMI_WLANFW_MAX_DATA_SIZE_V01;
++		chunk = min_t(u32, ath11k_bdf_chunk,
++			      QMI_WLANFW_MAX_DATA_SIZE_V01);
++		if (remaining > chunk) {
++			req->data_len = chunk;
+ 		} else {
+ 			req->data_len = remaining;
+ 			req->end = 1;
+@@ -2976,7 +3262,32 @@ static int ath11k_qmi_event_load_bdf(struct ath11k_qmi *qmi)
+ 		return ret;
+ 	}
+ 
+-	if (ab->hw_params.supports_regdb)
++	if (ab->hw_params.supports_regdb && ath11k_regdb_download)
++		ath11k_qmi_load_bdf_qmi(ab, true);
++
++	ret = ath11k_qmi_load_bdf_qmi(ab, false);
++	if (ret < 0) {
++		ath11k_warn(ab, "failed to load board data file: %d\n", ret);
++		return ret;
++	}
++
++	return 0;
++}
++
++static int ath11k_qmi_event_bdf_download(struct ath11k_qmi *qmi)
++{
++	struct ath11k_base *ab = qmi->ab;
++	int ret;
++
++	if (!ath11k_snoc_bdf_download) {
++		ath11k_info(ab, "snoc mode: skipping the BDF download\n");
++		return 0;
++	}
++
++	if (ath11k_snoc_bdf_delay_ms)
++		msleep(ath11k_snoc_bdf_delay_ms);
++
++	if (ab->hw_params.supports_regdb && ath11k_regdb_download)
+ 		ath11k_qmi_load_bdf_qmi(ab, true);
+ 
+ 	ret = ath11k_qmi_load_bdf_qmi(ab, false);
+@@ -3000,10 +3311,74 @@ static int ath11k_qmi_event_server_arrive(struct ath11k_qmi *qmi)
  		return ret;
  	}
  
@@ -303,17 +508,62 @@ index 7dc07339b..916703427 100644
 -		ath11k_warn(ab, "failed to send qmi host cap: %d\n", ret);
 -		return ret;
 +	if (ath11k_qmi_is_snoc(ab)) {
-+		ret = ath11k_qmi_msa_info_send(ab);
++		if (ath11k_snoc_host_cap == 1) {
++			ret = ath11k_qmi_host_cap_send(ab);
++			if (ret < 0)
++				ath11k_warn(ab, "host cap (before msa) failed: %d\n",
++					    ret);
++		}
++
++		if (ath11k_msa_handshake) {
++			ret = ath11k_qmi_msa_info_send(ab);
++			if (ret < 0) {
++				ath11k_warn(ab, "failed to send qmi msa info: %d\n",
++					    ret);
++				return ret;
++			}
++
++			ret = ath11k_qmi_msa_ready_send(ab);
++			if (ret < 0) {
++				ath11k_warn(ab, "failed to send qmi msa ready: %d\n",
++					    ret);
++				return ret;
++			}
++		}
++
++		if (ath11k_snoc_host_cap == 2) {
++			ret = ath11k_qmi_host_cap_send(ab);
++			if (ret < 0)
++				ath11k_warn(ab, "host cap (after msa) failed: %d\n",
++					    ret);
++		}
++
++		if (!ab->hw_params.fixed_fw_mem) {
++			/* the firmware asks for DDR memory over QMI; the standard
++			 * memory request/fw-mem-ready events then load the BDF
++			 */
++			ath11k_info(ab, "snoc mode: waiting for the memory request\n");
++			return 0;
++		}
++
++		ret = ath11k_qmi_request_target_cap(ab);
 +		if (ret < 0) {
-+			ath11k_warn(ab, "failed to send qmi msa info: %d\n", ret);
++			ath11k_warn(ab, "failed to request target caps: %d\n", ret);
 +			return ret;
 +		}
 +
-+		ret = ath11k_qmi_msa_ready_send(ab);
-+		if (ret < 0) {
-+			ath11k_warn(ab, "failed to send qmi msa ready: %d\n", ret);
-+			return ret;
++		if (!ath11k_snoc_bdf_wait_ind) {
++			ret = ath11k_qmi_event_bdf_download(qmi);
++			if (ret < 0) {
++				ath11k_warn(ab, "qmi failed to download BDF: %d\n",
++					    ret);
++				return ret;
++			}
++		} else {
++			ath11k_info(ab, "waiting for the MSA ready indication\n");
 +		}
++
++		return 0;
 +	}
 +
 +	/* The SNOC/icnss start sequence has no host_cap: after the MSA handshake
@@ -328,11 +578,64 @@ index 7dc07339b..916703427 100644
  	}
  
  	if (!ab->hw_params.fixed_fw_mem)
+@@ -3108,6 +3483,18 @@ static void ath11k_qmi_msg_cold_boot_cal_done_cb(struct qmi_handle *qmi_hdl,
+ 	ath11k_dbg(ab, ATH11K_DBG_QMI, "cold boot calibration done\n");
+ }
+ 
++static void ath11k_qmi_msg_msa_ready_ind_cb(struct qmi_handle *qmi_hdl,
++					   struct sockaddr_qrtr *sq,
++					   struct qmi_txn *txn,
++					   const void *data)
++{
++	struct ath11k_qmi *qmi = container_of(qmi_hdl, struct ath11k_qmi, handle);
++	struct ath11k_base *ab = qmi->ab;
++
++	ath11k_dbg(ab, ATH11K_DBG_QMI, "msa ready indication\n");
++	ath11k_qmi_driver_event_post(qmi, ATH11K_QMI_EVENT_MSA_READY, NULL);
++}
++
+ static void ath11k_qmi_msg_fw_init_done_cb(struct qmi_handle *qmi_hdl,
+ 					   struct sockaddr_qrtr *sq,
+ 					   struct qmi_txn *txn,
+@@ -3151,6 +3538,13 @@ static const struct qmi_msg_handler ath11k_qmi_msg_handlers[] = {
+ 			sizeof(struct qmi_wlanfw_fw_cold_cal_done_ind_msg_v01),
+ 		.fn = ath11k_qmi_msg_cold_boot_cal_done_cb,
+ 	},
++	{
++		.type = QMI_INDICATION,
++		.msg_id = QMI_WLFW_MSA_READY_IND_V01,
++		.ei = qmi_wlfw_msa_ready_ind_msg_v01_ei,
++		.decoded_size = sizeof(struct qmi_wlfw_msa_ready_ind_msg_v01),
++		.fn = ath11k_qmi_msg_msa_ready_ind_cb,
++	},
+ 	{
+ 		.type = QMI_INDICATION,
+ 		.msg_id = QMI_WLFW_FW_INIT_DONE_IND_V01,
+@@ -3303,6 +3697,11 @@ static void ath11k_qmi_driver_event_work(struct work_struct *work)
+ 				set_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags);
+ 			}
+ 			break;
++		case ATH11K_QMI_EVENT_MSA_READY:
++			ret = ath11k_qmi_event_bdf_download(qmi);
++			if (ret < 0)
++				set_bit(ATH11K_FLAG_QMI_FAIL, &ab->dev_flags);
++			break;
+ 		case ATH11K_QMI_EVENT_COLD_BOOT_CAL_DONE:
+ 			break;
+ 		default:
 diff --git a/drivers/net/wireless/ath/ath11k/qmi.h b/drivers/net/wireless/ath/ath11k/qmi.h
-index 350816c81..fff10aa28 100644
+index 350816c81..0bf98b3c8 100644
 --- a/drivers/net/wireless/ath/ath11k/qmi.h
 +++ b/drivers/net/wireless/ath/ath11k/qmi.h
-@@ -514,6 +514,43 @@ struct qmi_wlanfw_wlan_ini_resp_msg_v01 {
+@@ -70,6 +70,7 @@ enum ath11k_qmi_event_type {
+ 	ATH11K_QMI_EVENT_POWER_UP,
+ 	ATH11K_QMI_EVENT_POWER_DOWN,
+ 	ATH11K_QMI_EVENT_FW_INIT_DONE,
++	ATH11K_QMI_EVENT_MSA_READY,
+ 	ATH11K_QMI_EVENT_MAX,
+ };
+ 
+@@ -514,6 +515,47 @@ struct qmi_wlanfw_wlan_ini_resp_msg_v01 {
  	struct qmi_response_type_v01 resp;
  };
  
@@ -346,6 +649,10 @@ index 350816c81..fff10aa28 100644
 +#define QMI_WLFW_MSA_INFO_REQ_V01			0x002D
 +#define QMI_WLFW_MSA_INFO_REQ_MSG_V01_MAX_LEN		18
 +#define QMI_WLFW_MSA_READY_REQ_V01			0x002E
++#define QMI_WLFW_MSA_READY_IND_V01			0x002B
++struct qmi_wlfw_msa_ready_ind_msg_v01 {
++	char placeholder;
++};
 +#define QMI_WLFW_MSA_READY_REQ_MSG_V01_MAX_LEN		0
 +
 +struct wlfw_memory_region_info_s_v01 {
