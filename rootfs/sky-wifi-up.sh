@@ -12,6 +12,11 @@ log() { echo "sky-wifi: $*" >> "$LOG"; }
 
 log "start"
 
+# keep the previous boot's crash log readable (ramoops/pstore)
+[ -d /sys/fs/pstore ] && mountpoint -q /sys/fs/pstore 2>/dev/null || \
+	mount -t pstore pstore /sys/fs/pstore 2>/dev/null
+
+
 # Optional ath11k parameter overrides for this boot (see docs/m8-wifi.md):
 #   bdf_chunk / bdf_file_id / bdf_total_full / msa_handshake / regdb_download
 if [ -r /etc/sky-wifi-params ]; then
