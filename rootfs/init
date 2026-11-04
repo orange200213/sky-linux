@@ -41,13 +41,14 @@ mount -t tmpfs -o mode=0755,nosuid tmpfs /run 2>/dev/null
 # (apk) working.
 if [ "$(date +%Y)" -lt 2024 ]; then
 	newest=0
-	for f in /etc/init.d/* /etc/conf.d/* /etc/rc.conf /etc/inittab /etc/fstab /etc/passwd; do
+	for f in /etc/init.d /etc/conf.d /etc/init.d/* /etc/conf.d/* \
+	         /etc/rc.conf /etc/inittab /etc/fstab /etc/passwd; do
 		m=$(stat -c %Y "$f" 2>/dev/null) || continue
 		[ "$m" -gt "$newest" ] && newest=$m
 	done
 	# The dependency tree is written after this and must not look older than
-	# the /etc files OpenRC compares it with, so leave a margin.
-	[ "$newest" -gt 0 ] && date -u -s "@$((newest + 3600))" >/dev/null 2>&1
+	# the /etc files OpenRC compares it with, so leave a small margin.
+	[ "$newest" -gt 0 ] && date -u -s "@$((newest + 60))" >/dev/null 2>&1
 fi
 
 if [ ! -x /sbin/openrc-init ]; then

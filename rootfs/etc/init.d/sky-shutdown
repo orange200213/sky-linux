@@ -13,6 +13,9 @@ depend() {
 }
 
 stop() {
+	# Belt and braces for the sky-wifi panic guard: if the WLAN stack loaded
+	# and we are shutting down cleanly, the next boot must try it again.
+	rm -f /var/lib/sky-wifi/in-progress
 	ebegin "Syncing filesystems"
 	sync
 	sync
