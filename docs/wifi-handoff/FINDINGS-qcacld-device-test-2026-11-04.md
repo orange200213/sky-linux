@@ -1051,3 +1051,72 @@ insmod /root/wlan.ko              # 期望 wlan0 出现
 ip link set wlan0 up
 iw dev wlan0 scan                 # 期望列出周围 AP
 ```
+
+## 22. 第十六轮：修掉 NAPI teardown 的 3 条 WARNING ✅（并定位新的断连卡死）
+
+### 22.1 修复内容（`hif_napi.c`）
+
+7.3 的 NAPI 状态语义与老内核相反：
+* `napi_enable_locked()`  **清除** `NAPI_STATE_SCHED|NPSVC`
+* `napi_disable_locked()` **置位** `NAPI_STATE_SCHED|NPSVC`
+* `__netif_napi_del_locked()`：`WARN_ON(!test_bit(NAPI_STATE_SCHED))`
+  —— 即「删除时若 NAPI 仍处于 enabled 状态就告警」
+
+qcacld 里 `hif_init_rx_thread_napi()` 调了 `napi_enable()`，
+但 `hif_deinit_rx_thread_napi()` **只 `netif_napi_del()`**，于是每个 CE 一条 WARNING（3 个 = 3 条）。
+
+补丁：
+
+```c
+static void hif_deinit_rx_thread_napi(struct qca_napi_info *napii)
+{
+	/* NAPI_STATE_SCHED 置位 = 已 disable；napi_disable() 会自旋等待 SCHED/NPSVC 清零，
+	 * 因此只在 enabled 时才调用 */
+	if (!test_bit(NAPI_STATE_SCHED, &napii->rx_thread_napi.state))
+		napi_disable(&napii->rx_thread_napi);
+	netif_napi_del(&napii->rx_thread_napi);
+}
+```
+
+**验证**：新 `wlan.ko`（md5 `026b01f6775118389346cbe747582789`，62,485,096 B）经
+`rc-service sky-wifi start` 加载 → 连接成功（`wpa_state=COMPLETED`, `192.168.1.186`）→
+经完整 teardown（含 SSR 崩溃路径）后 `dmesg | grep -c netif_napi_del_locked` = **0**（此前 3）。
+
+### 22.2 新发现：断连卡死 → 强制 FW assert → SSR 恢复失败
+
+触发：`ip link set wlan0 down`（等于用户态 disconnect）
+
+```text
+[184] osif_cm_disconnect_sync: Received Disconnect reason:3 REASON_DEAUTH_NETWORK_LEAVING
+[184] Deauth TX: vdev 0 seq_num 2051 reason 3 waitForAck 1 to 78:8c:b5:82:fd:88
+[184] ol_txrx_peer_detach … peer_unmap_timer
+[196] scheduler_watchdog_notify: Callback cm_handle_disconnect_resp exceeded its allotted time of 10s
+[196] scheduler_watchdog_timeout: Triggering self recovery
+[196] cds_trigger_recovery_handler: critical host timeout trigger fw recovery for reason code 31
+[196] cds_force_assert_target_via_pld / icnss2: Received early crash indication from FW
+[198] remoteproc1: crash detected in wpss: type watchdog → recovering wpss
+[198] icnss2: WPSS went down, crashed: 1 → PD_SERVICE_DOWN → SERVER_EXIT
+[203] qcom_q6v5_pas: start timed out / remoteproc1: can't start rproc wpss: -110
+[207] cm_disconnect_start_req_sync: Disconnect timeout with status 15
+[259] icnss2: Timeout waiting for FW Ready 0x1368a
+```
+
+### 22.3 代码路径（已确认）
+
+`cm_handle_disconnect_resp` 只有两个来源（`lim_send_sme_rsp_messages.c`）：
+1. `lim_cm_send_disconnect_rsp()` ← `lim_process_sme_req_messages.c:4257`（**仅无 session 的快速路径**）
+2. 同文件 `:836`，即 `eWNI_SME_DISCONNECT_DONE_IND` 的处理里
+
+正常路径必须等 **deauth 帧 TX 完成（收到 ACK）** 才会产生 `DISCONNECT_DONE_IND`。
+日志里 `waitForAck 1` 之后**没有任何 TX completion/ACK 记录** ⇒ 推断：
+**管理帧 TX 完成事件（HTT tx_complete）没有被上报/处理**，导致断连永远等不到完成，
+10s 后被 scheduler watchdog 判定超时。
+
+⇒ 这与"下一轮要查的 qcacld RX 问题"高度相关：需要确认
+`HTT_TX_COMPL_IND` / mgmt tx completion 是否正常（`hdd_tx_completion`、`ol_tx_completion_handler`、
+`lim_process_mgmt_tx_complete` 之类），以及 RX ring 是否丢弃了 firmware 的 completion 事件。
+
+### 22.4 附带观察
+
+* `pktlog_send_per_pkt_stats_to_user: Send Failed -3 drop_count = 2/3` —— pktlog 未订阅时的正常拒绝，可忽略
+* `wlan_hdd_pld_uevent: Received firmware hang event` / `FW crashed, state: 0x1348b` —— SSR 流程被正确触发，但**恢复失败**（`rproc start timed out -110`），说明 SSR 重启 WPSS 的路径还有问题（下一轮一并查）
