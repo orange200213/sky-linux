@@ -1,0 +1,29 @@
+# Live test on the accepted handoff15 build (#104), 2026-11-04
+# via SSH, /sys/class/graphics/fb0/blank
+
+=== T0 (before) ===
+blank=0 uptime=280 fwloads=5 recover=4
+irq: 3745 -> 3805 in 5 s   (~12 IRQ/s, healthy)
+
+=== T1: echo 4 > fb0/blank  (panel off) ===
+blank=1 fwloads=6 recover=5
+[286.278] sky-fwinfo: fw_ver=0x18 ~=0xE7 raw=18e710240438099c
+[286.282] sky-state: raw=a00101000000 (ret=0, poll 0)
+[286.940] Firmware reset failed (raw=a00101000000 want 0xa1..0xaf ret=0).
+[286.945] sky: IC late in reaching ReK, continuing
+[286.949] Touch IC fw loaded ok
+[286.956] sky-report[0]: 777777777777 state=a00101000000 irq_line=0
+irq: 3816 -> 3816 in 5 s   (0 IRQ/s: IC never reached NORMAL_RUN)
+
+=== T2: echo 0 > fb0/blank  (panel back on) ===
+blank=0 fwloads=6 recover=5
+[305.167] sky-panel: vendor-long-write init; PPS sent, err=0     <- panel re-prepared
+[305.169] sky-panel: dcs read id=3 [c0 11 00] pwr=1 [9c]
+irq: 3816 -> 3816 in 6 s   (still 0 IRQ/s)
+
+# Diagnosis: the recovery that ran while the panel was off "succeeded" per
+# FWINFO and set DOWNLOAD_COMPLETE although the IC never left INIT (state 0xA0).
+# On the next panel prepare internal_pm_resume() then saw
+# SUSPEND clear + DOWNLOAD_COMPLETE set and did nothing, and the health poll
+# only reacted to 0xFD/0xFE/0xFF, so a stuck-in-INIT IC was never noticed.
+# Touch stayed dead until reboot.

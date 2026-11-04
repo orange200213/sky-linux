@@ -1,7 +1,25 @@
 # M8 — Wi-Fi (WCN6750 "adrastea" on SM4450)
 
-Status at the end of this session: **WPSS and the WLFW QMI handshake work, the
-WLAN interface does not come up yet.** The remaining blocker is a chip-variant
+> ## Status: ✅ works — through the out-of-tree `qcacld-3.0` stack
+>
+> There are two routes on this device and both are documented here:
+>
+> | Route | State |
+> |---|---|
+> | **`qcacld-3.0` ported to this mainline kernel** — [`sky-qcacld-3.0-mainline`](https://github.com/orange200213/sky-qcacld-3.0-mainline): Qualcomm's downstream WLAN driver (qcacld-3.0 + qca-wifi-host-cmn + fw-api) built as a module against our kernel, using `icnss2` and the vendor firmware from `NON-HLOS.bin`/`image/adrastea` | **works** — Wi-Fi is usable. **Still being optimised: it is a large downstream driver, so bugs can appear at any time** (association failures, firmware recovery, suspend/resume). Treat it as "working, not stable". |
+> | **Pure mainline `ath11k`** with the SNOC/adrastea variant | **closed (2026-11-02)** — the bring-up reached `ath11k_core_qmi_firmware_ready()`, then hardware probing proved the APSS can only reach the SR_APSS block (`membase+0x20000..0x52000`) and 12 CE shadow slots: CE ring base/size and the UMAC/WBM/REO/TCL registers are unreachable, so ath11k's "host programs the rings" model cannot work on this platform. Evidence: `docs/wifi-handoff/FINDINGS-session9-shadow-reg-confirmed.md`; route decision: `docs/wifi-handoff/HANDOFF-qcacld-mainline.md`. |
+>
+> The rest of this file is the record of the mainline-`ath11k` attempt (hybrid vs SNOC,
+> every experiment, every trap). It stays as evidence for why the qcacld route was chosen —
+> it is *not* required to have working Wi-Fi.
+>
+> First on-device test of the qcacld modules (2026-11-04) found two integration gaps that are
+> **not** driver bugs: 27 `wlfw_*_msg_v01_ei` symbols missing/not exported, and no
+> `qcom,icnss` node in the DTS. See `docs/wifi-handoff/FINDINGS-qcacld-device-test-2026-11-04.md`.
+
+Status at the end of the **mainline-`ath11k`** session (kept for the record): WPSS and the
+WLFW QMI handshake work, the WLAN interface does not come up yet. The remaining blocker is a
+chip-variant
 mismatch inside mainline `ath11k`: this board's WLAN is the **SNOC** variant of
 the WCN6750 (vendor compatible `qcom,icnss`, registers directly mapped at
 `0x22800000`), while mainline's `qcom,wcn6750-wifi` support is written for the

@@ -1,4 +1,4 @@
-# M7 — touchscreen (Novatek NT36672E over QUPv3 SPI)
+# M7 — touchscreen (Novatek NT36672C, Tianma M19 module, over QUPv3 SPI)
 
 **Status: 🚧 partial.** Touch reports real multi-touch events on `/dev/input/event3`, survives
 long runs, and recovers from a wedged controller without a reboot — but read the scope of
@@ -7,40 +7,47 @@ what has actually been validated:
 | What was verified | How | Caveat |
 |---|---|---|
 | the controller works end to end | raw events read with `dd if=/dev/input/event3 bs=24 … \| od -Ax -tx1` and `tools/decode_evdev.py` | **never yet exercised through a desktop / window manager** (no X, no Wayland, no Phosh/weston/libinput session has been run) |
-| panel `m19` (1080×2460, IPS LCD) only | this unit | no other panel or regional variant has been tried; coordinates are scaled for this panel |
+| panel `m19` (Tianma M19 module, 1080×2460 IPS LCD) only | this unit | no other panel or regional variant has been tried; coordinates and the panel-follower link are specific to this panel |
+| **45-minute continuous run** without a second firmware reset | `docs/handoff-touch-driver-20261104/evidence/boot-and-stability.log` | one recovery during the first initialisation is normal (see below) |
+| display off → on re-initialises the IC | `echo 4 > /sys/class/graphics/fb0/blank; sleep 5; echo 0 > …` then a fresh `Touch IC fw loaded ok` | works on hardware; still new code |
 | Japanese-market Redmi 12 5G (`sky`), stock `V14.0.7.0.TMWINXM` | whole project | other variants of the same model may use a different touch controller/panel |
 | `sky-report` shows the IC in `NORMAL_RUN` (`state=a3…`), IRQ ≈ 12/s idle | `dmesg`, `/proc/interrupts` | — |
 
-**Known risk: touch can still drop.** The controller occasionally falls back into its reset
-state (`sky-report` turns into `0xFD`/`0xFE`, IRQ storm ~200/s). The driver now recovers in
-software **without a reboot** (SPI lock + `TP_RST` pulse + retry schedule), but why the IC
-dies in the first place is not fully explained (ESD event or an analog supply glitch are the
-remaining candidates). Treat a long-running session with touch as "usually fine, but it can
-wedge and needs a few seconds to heal".
+**Known risk: touch can still drop.** Two distinct causes were found and fixed in the
+2026-11-04 driver: a **wrong firmware image** (FW_VER `0x12`, which resets after ~9.5 min;
+the correct vendor image is FW_VER `0x18`) and the missing **DRM panel-follower link**, which
+left the touch power state machine dead after a screen-on. Both are fixed and a 45-minute run
+showed no second reset, but the driver still has to recover occasionally on the first
+initialisation and the long-term behaviour (hours, many suspend/resume cycles) is not proven.
+Treat a long session as "usually fine, it may heal itself once, and it has not been proven
+under a desktop yet".
 
 Because of the two points above this milestone is marked **partial**, not done.
 
-Reference image: `sky-shim-boot-v4-recover-hwreset.img`
-(sha256 `8ed569ca617688e8037a48ff0b4e54531bda3c55e0e7b731fd33b1b571c56bac`, 120,086,528 B),
-archived in `build/archives/handoff13-runtime-recovery-20261101/` together with the kernel
-`Image`, the DTB, the driver sources and the patch. The boot-time-validated predecessor is
-`sky-shim-boot-v4-touch-ok.img` (`a16ce9e9…`).
+Reference image: `shim/out/sky-shim-boot-v4-dt-final.img`
+(sha256 `831227eb…`), built with kernel `7.3.0` (`Image` sha256 `a5f13f9b75048675…`) and the
+driver in `kernel/drivers/touchscreen/nt36xxx/` (core `62bf354e0f0b7717…`, 2098 lines).
+The handoff package with the technical write-up, the evidence logs and the DTS node is
+`docs/handoff-touch-driver-20261104/`. Older references: the runtime-recovery build
+`sky-shim-boot-v4-recover-hwreset.img`
+(`8ed569ca617688e8037a48ff0b4e54531bda3c55e0e7b731fd33b1b571c56bac`) and the boot-time
+fix `sky-shim-boot-v4-touch-ok.img` (`a16ce9e9…`).
 
 ## Hardware
 
 | Item | Value |
 |---|---|
-| Touch IC | Novatek **NT36672E** (chip-id payload `0C 00 00 72 66 03`) |
+| Touch IC | Novatek **NT36672C** in a **Tianma M19** module (trim `0C 00 00 72 66 03` → NT36675 register map, `hw_crc=2`) |
 | Bus | QUPv3 **wrapper 1, SE1** at `0xa84000`, `qcom,geni-spi` |
 | SPI interrupt | GIC SPI **354** (level high) |
 | Touch interrupt | TLMM **gpio13**, active low (`irq-gpios`) |
-| Reset | TLMM **gpio12**, active low (`reset-gpios`) |
+| Reset | TLMM **gpio12** (`reset-gpios`); the retail board has no hardware reset line in use, the driver uses **SPI soft reset** and only the pinctrl pull on gpio12 |
 | Pins | gpio26 SCLK, gpio27 CS, gpio50 MISO, gpio51 MOSI, function `qup1_se1` |
 | SE clocks | `GCC_QUPV3_WRAP1_S1_CLK` (19.2 MHz), `GCC_QUPV3_WRAP1_CORE_CLK` |
 | Wrapper clocks | `GCC_QUPV3_WRAP_1_M_AHB_CLK`, `GCC_QUPV3_WRAP_1_S_AHB_CLK` |
 | DMA | wrapper-1 GPI DMA at `0xa00000` (`qcom,sm4450-gpi-dma`), `#dma-cells = <3>` |
 | Bus clock | 4 MHz (`spi-max-frequency = <4000000>`) |
-| Firmware | `novatek/nt36672c.bin` (139,264 B, from the phone's vendor partition) |
+| Firmware | `novatek/nt36672c.bin`, **139,264 B, FW_VER `0x18`** (sha256 `87dba28ecbc7e81f…`), from the phone's `/vendor/firmware/novatek_ts_fw.bin` — a `0x12` image from another tree also passes the driver's `FW_VER+VER_BAR==0xFF` check but resets after ~9.5 min |
 | Input device | `Novatek NT36XXX Touchscreen`, `/dev/input/event3`, abs 1080×2460 |
 
 ## The two defects that made this take many rounds
@@ -125,11 +132,11 @@ spi_touch: spi@a84000 {
 ## Driver
 
 The driver started as the **mainline-oriented regmap port** from `sm7150-mainline/linux`
-(`nt36xxx_core.c` + `nt36xxx_spi.c` + `nt36xxx.h`, ~1230 lines) and was then extended to the
-version that actually runs (~1880 lines). Both files live in the repo at
-`kernel/drivers/touchscreen/nt36xxx/`; the exact validated copies are also in
-`build/archives/handoff13-runtime-recovery-20261101/source/` (sha256 in that folder's
-`SHA256SUMS`). Kconfig symbol: `CONFIG_TOUCHSCREEN_NT36XXX_ML`.
+(`nt36xxx_core.c` + `nt36xxx_spi.c` + `nt36xxx.h`, ~1230 lines) and was extended twice; the
+current version is the **2026-11-04** one (`nt36xxx_core.c`, 2098 lines). The files live at
+`kernel/drivers/touchscreen/nt36xxx/` and the validated copies are also in
+`docs/handoff-touch-driver-20261104/` (sha256 in `SHA256SUMS`). Kconfig symbol:
+`CONFIG_TOUCHSCREEN_NT36XXX_ML`.
 
 Changes on top of upstream, in the order they were needed:
 
@@ -149,9 +156,25 @@ Changes on top of upstream, in the order they were needed:
 7. runtime recovery: `nt36xxx_health_work()`, `nt36xxx_sky_schedule_recover()`,
    `nt36xxx_hw_reset()` and the `ts->lock` serialisation
    (`kernel/patches/0004-nt36xxx-lock-and-hw-reset-recovery.patch`);
-8. DRM panel-follower hooks (`panel_prepared` / `panel_unpreparing`) so the touch controller
-   follows the panel: it is re-initialised on wake and told to sleep
-   (`ENTER_SLEEP` to `EVENT_BUF_ADDR | 0x50`) on suspend.
+8. DRM panel-follower hooks (`panel_prepared` / `panel_unpreparing` / enabled / disabling) so
+   the touch controller follows the panel: it is re-initialised on wake and told to sleep
+   (`ENTER_SLEEP` to `EVENT_BUF_ADDR | 0x50`) on suspend. **This requires `panel = <&panel>;`
+   in the touch node** — `drm_is_panel_follower()` only looks for that phandle, and without
+   it the whole display power state machine is dead code (screen-on then never re-initialises
+   the IC).
+
+Behaviour that differs from the vendor driver on purpose (all measured):
+
+| Item | Vendor | Ours | Why |
+|---|---|---|---|
+| SPI clock | 9.6 MHz | **4 MHz** | 1 MHz wedges the firmware download; 4 MHz gives stable write+read-back (9.6 MHz was never validated on large transfers) |
+| firmware chunk | 63 KiB | **16 KiB** | the mainline GPI/SPI path dies on ~64 KiB transfers |
+| write verification | relies on the IC's BLD CRC | **read-back compare + bad-block rewrite** | SRAM writes were observed corrupted; rewriting converges to `bad=0` |
+| report length | 109 B (super-resolution) | **66 B** (10 points × 6 B + header) | in this firmware the bytes from offset 98 are the `0x22D60` RESET_COMPLETE register, not pressure |
+| pressure | `point_data[99+i]` | 5th byte of each point | as above |
+| `0x77` idle pattern | treated as a firmware reset | **ignored** | on this IC the idle frame really is `0x77`; treating it as a reset re-flashed every idle frame |
+| gestures / double-tap wake | yes | not implemented | needs `wakeup-source` + an input-event hook |
+| stylus / factory test | yes | not implemented | not needed for basic touch |
 
 Why the regmap port rather than the vendor import: it caps transfers at
 `spi_max_transfer_size()` instead of handing the controller one multi-kilobyte buffer, which
@@ -190,16 +213,22 @@ dd if=/dev/input/event3 bs=24 count=200 2>/dev/null | od -Ax -tx1 -v   # EV_ABS 
 ## Known open items (stability testing)
 
 0. **Desktop / window-manager validation** — the only verification so far is raw
-   `/dev/input/event3` output. Run a real input stack (libinput + Wayland compositor or X)
-   and confirm clicks, drags, edge coordinates and multi-touch gestures.
-1. **Touch after display off/on and across a `fbcon` blank/unblank cycle** — the
-   panel-follower suspend path writes `ENTER_SLEEP` to `EVENT_BUF_ADDR | 0x50`; that is new
-   and untested on hardware.
-2. **Corner-to-corner coordinate check** with `tools/decode_evdev.py` (four corners and the
-   panel edges).
-3. Optional: add pinctrl active/suspend states for the INT pad, matching the vendor's
-   `nvt_pinctrl_init()`.
-4. Optional clean-up: downgrade the touch `dev_info`s to `dev_dbg` and drop the
+   `/dev/input/event3` output. Run a real input stack (libinput + a Wayland compositor or X)
+   and confirm clicks, drags, edge coordinates and gestures. **This is the reason the
+   milestone is still `partial`.**
+1. **Corner-to-corner coordinate check** with `tools/decode_evdev.py` (four corners and the
+   panel edges) on the final image — the ranges are verified (0..1079 / 0..2459), the mapping
+   at the extremes is not.
+2. **Long-run behaviour** beyond the 45-minute evidence run: hours, and many suspend/resume
+   cycles. One recovery during the first initialisation is still expected
+   (`sky-recover[1]`), followed by stability. Debug hook: writing `1` to
+   `/sys/bus/spi/devices/spi0.0/sky_reinit` replays the resume re-flash without a real
+   screen-off.
+3. **pinctrl sleep state** — the DTS wires only `default`/`ts_active`; the driver has no
+   `pinctrl_select_state()` for `ts_int_suspend`/`ts_reset_suspend` yet.
+4. **Gestures / double-tap wake** — needs `wakeup-source`, an input-event hook,
+   host command `0x13` and `enable_irq_wake()` on gpio13.
+5. Optional clean-up: downgrade the touch `dev_info`s to `dev_dbg` and drop the
    `sky-report`/`sky-state` noise once nothing is being debugged.
 
 ## Do not repeat
@@ -218,6 +247,8 @@ dd if=/dev/input/event3 bs=24 count=200 2>/dev/null | od -Ax -tx1 -v   # EV_ABS 
 
 ## History
 
+`docs/handoff-touch-driver-20261104/` is the current package (technical write-up,
+`DRIVER.md`, evidence logs, DTS node, firmware notes).
 `docs/touch-handoff/`, `docs/touch-handoff2/`, `docs/touch-handoff3/` and
 `docs/handoff{6..13}/` record the whole path: the vendor-driver import, the QUP wrapper
 naming trap (`qupv3_id_0` = vendor "wrapper 1"), the FIFO dead end, the QUP-firmware panic,

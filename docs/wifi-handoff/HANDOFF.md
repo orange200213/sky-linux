@@ -1,5 +1,11 @@
 # M8 handoff — Wi-Fi / Bluetooth (WCN6750 "adrastea" on SM4450)
 
+> **Working Wi-Fi does not need any of this.** The shipped route is the out-of-tree
+> `qcacld-3.0` port in [`sky-qcacld-3.0-mainline`](https://github.com/orange200213/sky-qcacld-3.0-mainline)
+> — it works, and is still being optimised (bugs can appear at any time). The pages here
+> describe the pure-mainline `ath11k` attempt, which was **closed on 2026-11-02** after
+> hardware probing showed the APSS cannot reach the CE/UMAC registers on this SNOC variant.
+>
 > **This file is the starting point only.** It was written before the port was attempted.
 > The work then went much further and is now documented in
 > **`HANDOFF-snoc-mainline.md`** (working handoff, kernel #83) and `../m8-wifi.md`

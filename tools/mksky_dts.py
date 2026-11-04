@@ -9,12 +9,13 @@ import os
 import re
 import sys
 
-sys.path.insert(0, os.path.dirname(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MAINLINE = os.path.abspath(os.path.join(ROOT, "..", "sky-mainline"))
+sys.path.insert(0, os.path.join(MAINLINE, "tools"))
 import dts_blocks as B  # noqa: E402
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = os.path.join(ROOT, "rocknix", "dts", "sm4450-anbernic-rg55g1.dts")
-OUT = os.path.join(ROOT, "dts", "sm4450-xiaomi-sky.dts")
+SRC = os.path.join(MAINLINE, "rocknix", "dts", "sm4450-anbernic-rg55g1.dts")
+OUT = os.environ.get("SKY_DTS_OUTPUT", os.path.join(ROOT, "dts", "sm4450-xiaomi-sky.dts"))
 
 HEADER = """// SPDX-License-Identifier: BSD-3-Clause
 /*
@@ -241,6 +242,11 @@ MEM_TAIL = """
 
 
 def main():
+    if os.path.exists(OUT) and 'compatible = "qcom,icnss";' in open(OUT).read():
+        raise SystemExit(
+            "Refusing to overwrite the Adrastea ICNSS2 board DTS: "
+            "this generator still emits a WCN/ath11k node"
+        )
     text = open(SRC).read()
 
     # 1. model / compatible

@@ -1,0 +1,55 @@
+input: touchscreen: nt36xxx: mainline NT36672C SPI driver for Xiaomi sky
+
+Add/refresh the regmap-based Novatek NT36XXX SPI touchscreen driver used on
+the Xiaomi Redmi 12 5G (SM4450 / "sky"), where the panel is a Tianma M19 and
+the controller is an NT36672C (trim ID 0C 00 00 72 66 03 -> NT36675 register
+map, hw_crc = 2).  Behaviour was derived from the retail driver
+(Xiaomi_Kernel_OpenSource sky-t-oss, NT36672C_SPI/) and validated on hardware.
+
+Data path
+  * 66-byte report reads at EVENT_BUF_ADDR 0x22D00, ten six-byte points,
+    16-bit big-endian coordinates in 1/10 pixel, scaled to panel pixels;
+  * MT protocol B, ABS_MT_TOUCH_MAJOR/PRESSURE from the per-point strength
+    byte;
+  * every SPI user takes ts->lock (report path, init worker, health poll,
+    suspend) - the bus has no arbitration.
+
+Initialisation
+  * bootloader reset (0x69), BLD CRC descriptor/length/golden banks written
+    BEFORE the firmware write (retail order), 16 KiB chunks with per-partition
+    read-back verify and bad-block rewrite, BLD_CRC_EN, fw-crc enable,
+    BOOT_RDY, INIT then REK state checks, and a first-report check before the
+    interrupt is unmasked;
+  * the first bring-up is deferred by 14 s like the retail driver; later
+    bring-ups are driven by the DRM panel follower.
+
+Firmware handling
+  * retail firmware (FW_VER 0x18) required; FWINFO is validated with the
+    fw_ver/~fw_ver complement as the retail driver does.
+
+Recovery
+  * ten consecutive all-0xFD/0xFE reports, or a 2 s health poll reading a
+    state outside A0..AF or below REK twice, trigger a re-init;
+  * retries use the retail reset ladder 0xAA/0x5A/0x55; 5 attempts 2 s apart,
+    then one per minute; after three slow failures the driver parks (logs once
+    and stops touching the IC) until the panel is re-enabled or the machine
+    reboots;
+  * all-0x77 is treated as the idle pattern, never as a firmware reset.
+
+Power management
+  * DRM panel follower: panel_enabled re-downloads the firmware 40 ms after
+    the panel is enabled (retail re-flashes on every resume), panel_disabling/
+    panel_unpreparing put the IC to sleep and mask the interrupt.  Requires the
+    "panel" phandle in DT.
+
+DT requirements (touchscreen node)
+  * compatible, reg, firmware-name, spi-max-frequency, novatek,swrst-n8-addr,
+    novatek,spi-rd-fast-addr, irq-gpios, reset-gpios, touchscreen-size-x/y,
+    panel = <&panel>, pinctrl-0 = <&ts_active>.
+
+Known limitations: no gesture wake (0x13/enable_irq_wake), no stylus or
+production-test (mp) support, no Xiaomi touch-mode HAL nodes, report length is
+66 bytes because this firmware's "super resolution" region aliases the
+RESET_COMPLETE register.
+
+Tested on: Xiaomi Redmi 12 5G (sky), kernel 7.3, SPI 4 MHz, GPI DMA.

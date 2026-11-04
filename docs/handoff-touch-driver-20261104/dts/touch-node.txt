@@ -1,0 +1,35 @@
+		touchscreen@0 {
+			compatible = "novatek,nvt-ts-spi";
+			reg = <0>;
+			status = "okay";
+			firmware-name = "novatek/nt36672c.bin";
+			spi-max-frequency = <4000000>;
+			novatek,swrst-n8-addr = <0x3f0fe>;
+			novatek,spi-rd-fast-addr = <0x3f310>;
+			irq-gpios = <&tlmm 13 GPIO_ACTIVE_LOW>;
+			reset-gpios = <&tlmm 12 GPIO_ACTIVE_LOW>;
+			touchscreen-size-x = <1080>;
+			touchscreen-size-y = <2460>;
+
+			/*
+			 * DRM panel follower link.  drm_is_panel_follower() only
+			 * tests for this phandle and find_panel_by_dev() resolves
+			 * it, so without it the driver never receives
+			 * panel_prepared/enabled/unpreparing/disabling and its
+			 * whole display power state machine is dead code (a
+			 * screen-on then never re-initialises the touch IC).
+			 */
+			panel = <&panel>;
+
+			/*
+			 * Apply the pin group the board really uses for INT/RST
+			 * (gpio13/gpio12: function gpio, drive-strength 8,
+			 * bias-pull-up).  The ts_* groups existed but were never
+			 * referenced, so the pads kept whatever the bootloader
+			 * left behind.  Only the "default" state is used: the
+			 * driver has no pinctrl_select_state() call for a sleep
+			 * state yet.
+			 */
+			pinctrl-names = "default";
+			pinctrl-0 = <&ts_active>;
+		};

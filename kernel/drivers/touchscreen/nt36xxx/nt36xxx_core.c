@@ -68,6 +68,8 @@ enum {
 	MMAP_R_ILM_CHECKSUM_ADDR,
 	MMAP_SPI_RD_FAST_ADDR,
 	MMAP_SWRST_N8_ADDR,
+	MMAP_HISTORY_EVENT0,
+	MMAP_HISTORY_EVENT1,
 
 	/* below are magic numbers in source code */
 	MMAP_MAGIC_NUMBER_0X1F64E_ADDR,
@@ -84,7 +86,9 @@ static struct drm_panel_follower_funcs nt36xxx_panel_follower_funcs;
 #define NT36XXX_RECOVER_LIMIT	5
 #define NT36XXX_RECOVER_FAST_MS	2000
 #define NT36XXX_RECOVER_SLOW_MS	60000
+#define NT36XXX_RECOVER_SLOW_TRIES 3
 #define NT36XXX_HEALTH_PERIOD_MS 2000
+#define NT36XXX_FIRST_INIT_MS	14000
 
 static int sky_fw_attempts;
 
@@ -121,6 +125,8 @@ struct nt36xxx_ts {
 	unsigned int health_bad;
 	unsigned int report_log_cnt;
 	bool quiet_init;
+	bool give_up;
+	bool init_once;
 
 	/* this is a duplicate with nt36xxx_chip_data and since the address might
 	 * change in boot/init/download stages so make it a copy of initial map and
@@ -249,6 +255,9 @@ const u32 nt36675_memory_maps[] = {
 	[MMAP_SPI_RD_FAST_ADDR] = 0x03F310,
 	[MMAP_SWRST_N8_ADDR] = 0x03F0FE,
 
+	[MMAP_HISTORY_EVENT0] = 0x23D10,
+	[MMAP_HISTORY_EVENT1] = 0x23D50,
+
 	[MMAP_ENG_RST_ADDR] = 0x7FFF80,
 	[MMAP_MAGIC_NUMBER_0X1F64E_ADDR] = 0x1F64E,
 
@@ -293,6 +302,9 @@ const u32 nt36672a_memory_maps[] = {
 
 	[MMAP_SPI_RD_FAST_ADDR] = 0x03F310,
 	[MMAP_SWRST_N8_ADDR] = 0x03F0FE,
+
+	[MMAP_HISTORY_EVENT0] = 0x218D6,
+	[MMAP_HISTORY_EVENT1] = 0x24B2D,
 
 	[MMAP_ENG_RST_ADDR] = 0x7FFF80,
 	[MMAP_MAGIC_NUMBER_0X1F64E_ADDR] = 0x1F64E,
@@ -344,32 +356,69 @@ static int nt36xxx_eng_reset_idle(struct nt36xxx_ts *ts)
 }
 
 /**
- * nt36xxx_hw_reset - Pulse the touch controller's reset pin
+ * nt36xxx_sw_reset_idle - MCU idle command (vendor nvt_sw_reset_idle)
  * @ts: Main driver structure
  *
- * Port of the vendor recovery step (nt36xxx_fw_update.c,
- * nvt_download_firmware_hw_crc): hold TP_RST asserted while the engineering
- * reset command is sent, then release it and wait tRT2BRST before the
- * bootloader reset.  A firmware that crashed cannot be recovered by software
- * alone - the MCU stays wedged until this pin is pulsed, which is exactly why
- * only a reboot restored touch before.
+ * The retail driver's WDT recovery sends 0xAA to SWRST_SIF_ADDR when the
+ * report area reads 0xFE, before it re-downloads the firmware.  This is the
+ * only reset primitive the retail build uses: it has no hardware reset pin
+ * (NVT_TOUCH_SUPPORT_HW_RST=0, GPIO12 is unclaimed in its pinctrl state).
  */
-static void nt36xxx_hw_reset(struct nt36xxx_ts *ts)
+static void nt36xxx_sw_reset_idle(struct nt36xxx_ts *ts)
 {
-	if (!ts->reset_gpio)
-		return;
+	regmap_write(ts->regmap, ts->mmap[MMAP_SWRST_N8_ADDR],
+		     NT36XXX_CMD_SW_RESET_IDLE);
+	msleep(15);
+}
 
-	/* reset-gpios is GPIO_ACTIVE_LOW: logical 1 asserts TP_RST */
-	gpiod_set_value_cansleep(ts->reset_gpio, 1);
-	mdelay(1);
-
-	/* the MCU samples the engineering reset while TP_RST is held */
-	nt36xxx_eng_reset_idle(ts);
-
-	gpiod_set_value_cansleep(ts->reset_gpio, 0);
+/**
+ * nt36xxx_sw_reset - MCU software reset (vendor nvt_sw_reset)
+ * @ts: Main driver structure
+ */
+static void nt36xxx_sw_reset(struct nt36xxx_ts *ts)
+{
+	regmap_write(ts->regmap, ts->mmap[MMAP_SWRST_N8_ADDR],
+		     NT36XXX_CMD_SW_RESET);
 	msleep(10);
+}
 
-	dev_info(ts->dev, "sky-recover: TP_RST pulsed\n");
+/**
+ * nt36xxx_sky_dump_fw_history - Log the IC's crash history registers
+ * @ts: Main driver structure
+ *
+ * The retail driver prints these two regions before it re-downloads the
+ * firmware (nvt_read_fw_history).  They are the only record of why the
+ * firmware stopped, so keep them for the recovery path only.
+ */
+static void nt36xxx_sky_dump_fw_history(struct nt36xxx_ts *ts)
+{
+	static const int idx[] = { MMAP_HISTORY_EVENT0, MMAP_HISTORY_EVENT1 };
+	u8 buf[16];
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(idx); i++) {
+		if (!ts->mmap[idx[i]])
+			continue;
+		if (regmap_raw_read(ts->regmap, ts->mmap[idx[i]], buf,
+				    sizeof(buf)))
+			continue;
+		dev_info(ts->dev, "sky-fwhist[%d]: %16phN\n", i, buf);
+	}
+}
+
+/**
+ * nt36xxx_sky_recover_reset - Bring a wedged MCU back, retail-driver style
+ * @ts: Main driver structure
+ *
+ * Order taken from the retail driver: idle command (0xAA), engineering reset
+ * (0x5A), and the caller then runs the bootloader reset (0x69) and the normal
+ * download.  No reset GPIO is involved - the board does not use one.
+ */
+static void nt36xxx_sky_recover_reset(struct nt36xxx_ts *ts)
+{
+	nt36xxx_sw_reset_idle(ts);
+	nt36xxx_eng_reset_idle(ts);
+	nt36xxx_sw_reset(ts);
 }
 
 /**
@@ -664,6 +713,10 @@ static void nt36xxx_report(struct nt36xxx_ts *ts)
 	unsigned int ppos = 0;
 	int i, ret;
 
+	/* the init worker owns the IC until its first download completed */
+	if (!(ts->status & NT36XXX_STATUS_DOWNLOAD_COMPLETE) || ts->give_up)
+		return;
+
 	/*
 	 * SPI has no arbitration: a report read that interleaves with another
 	 * user of the bus (the health poll, an init sequence) puts the page
@@ -727,9 +780,19 @@ static void nt36xxx_report(struct nt36xxx_ts *ts)
 			obj->y = nt36xxx_scale_coord(raw_y, raw_y_max,
 						     ts->prop.max_y);
 
-			obj->z = point[ppos + 5];
-			if (obj->z == 0)
-				obj->z = 1;
+			/*
+			 * The retail "super resolution" pressure lives at
+			 * 0x22D00 + 98, which on this firmware is the event
+			 * buffer's RESET_COMPLETE register, not pressure (proven
+			 * by the sky-report pres= dump).  The only per-point
+			 * strength this IC reports is the last point byte, so
+			 * both the touch major and the pressure come from it.
+			 */
+			obj->tm = point[ppos + 5];
+			if (obj->tm == 0)
+				obj->tm = 1;
+
+			obj->z = obj->tm;
 
 
 			input_mt_slot(input, input_id - 1);
@@ -739,6 +802,7 @@ static void nt36xxx_report(struct nt36xxx_ts *ts)
 						obj->x,
 						obj->y, true);
 
+			input_report_abs(input, ABS_MT_TOUCH_MAJOR, obj->tm);
 			input_report_abs(input, ABS_MT_PRESSURE, obj->z);
 		}
 	}
@@ -986,12 +1050,54 @@ static void __maybe_unused nt36xxx_tx_size_sweep(struct nt36xxx_ts *ts);
 static int nt36xxx_sky_write_part(struct nt36xxx_ts *ts, int idx);
 static void nt36xxx_sky_dump_crc(struct nt36xxx_ts *ts);
 
+/*
+ * Retail order (nt36xxx_fw_update.c, nvt_download_firmware_hw_crc):
+ *   nvt_bootloader_reset() -> nvt_set_bld_hw_crc() -> nvt_write_firmware() ...
+ * The ILM/DLM descriptor, length and golden-CRC banks are programmed *before*
+ * the firmware is written, not after it.  Writing them afterwards was our only
+ * ordering deviation from the retail download.
+ */
+static void nt36xxx_set_bld_hw_crc(struct nt36xxx_ts *ts)
+{
+	int i;
+
+	for (i = 0; i < ts->fw_data.partition; i++) {
+		u32 des, len, golden;
+
+		if (!ts->bin_map[i].size)
+			continue;
+
+		if (!strncmp(ts->bin_map[i].name, "ILM", 3)) {
+			des = MMAP_ILM_DES_ADDR;
+			len = MMAP_ILM_LENGTH_ADDR;
+			golden = MMAP_G_ILM_CHECKSUM_ADDR;
+		} else if (!strncmp(ts->bin_map[i].name, "DLM", 3)) {
+			des = MMAP_DLM_DES_ADDR;
+			len = MMAP_DLM_LENGTH_ADDR;
+			golden = MMAP_G_DLM_CHECKSUM_ADDR;
+		} else {
+			continue;
+		}
+
+		regmap_raw_write(ts->regmap, ts->mmap[des],
+				 &ts->bin_map[i].sram_addr, 3);
+		regmap_raw_write(ts->regmap, ts->mmap[len],
+				 &ts->bin_map[i].size, 3);
+		regmap_raw_write(ts->regmap, ts->mmap[golden],
+				 &ts->bin_map[i].crc,
+				 sizeof(ts->bin_map[i].crc));
+	}
+}
+
 static int32_t nt36xxx_download_firmware_hw_crc(struct nt36xxx_ts *ts) {
 	uint32_t list = 0;
 	uint32_t bin_addr, sram_addr, size;
 	struct nvt_ts_bin_map *bin_map = ts->bin_map;
 
 	nt36xxx_bootloader_reset(ts);
+
+	/* retail: descriptors and golden CRCs are programmed before the write */
+	nt36xxx_set_bld_hw_crc(ts);
 
 	for (list = 0; list < ts->fw_data.partition; list++) {
 		int j, ret;
@@ -1192,26 +1298,6 @@ upload:
 	}
 
 
-	/* set ilm & dlm reg bank */
-	for (i = 0; i < ts->fw_data.partition; i++) {
-		if (0 == strncmp(ts->bin_map[i].name, "ILM", 3)) {
-			regmap_raw_write(ts->regmap, ts->mmap[MMAP_ILM_DES_ADDR], &ts->bin_map[i].sram_addr, 3);
-			regmap_raw_write(ts->regmap, ts->mmap[MMAP_ILM_LENGTH_ADDR], &ts->bin_map[i].size, 3);
-
-			/* crc > 1 then len = 4, crc = 1 then len = 3 */
-			regmap_raw_write(ts->regmap, ts->mmap[MMAP_G_ILM_CHECKSUM_ADDR], &ts->bin_map[i].crc,
-						sizeof(ts->bin_map[i].crc));
-		}
-		if (0 == strncmp(ts->bin_map[i].name, "DLM", 3)) {
-			regmap_raw_write(ts->regmap, ts->mmap[MMAP_DLM_DES_ADDR], &ts->bin_map[i].sram_addr, 3);
-			regmap_raw_write(ts->regmap, ts->mmap[MMAP_DLM_LENGTH_ADDR], &ts->bin_map[i].size, 3);
-
-			/* crc > 1 then len = 4, crc = 1 then len = 3 */
-			regmap_raw_write(ts->regmap, ts->mmap[MMAP_G_DLM_CHECKSUM_ADDR], &ts->bin_map[i].crc,
-						sizeof(ts->bin_map[i].crc));
-		}
-	}
-
 	/* nvt_bld_crc_enable() */
 	/* crc enable */
 	regmap_raw_read(ts->regmap, ts->mmap[MMAP_BLD_CRC_EN_ADDR], val, 1);
@@ -1381,6 +1467,23 @@ static void nt36xxx_sky_schedule_recover(struct nt36xxx_ts *ts, const char *why)
 	    time_before(jiffies, ts->recover_time + msecs_to_jiffies(spacing)))
 		return;
 
+	/*
+	 * After the fast phase and a few slow attempts the IC is not coming
+	 * back by itself (measured: five failed re-inits end in a 200 IRQ/s
+	 * storm with every report read returning 0xFE).  Stop touching it and
+	 * leave the IC alone until a panel prepare or a reboot; the interrupt
+	 * storm then costs one early return instead of an SPI read each.
+	 */
+	if (ts->recover_tries >= NT36XXX_RECOVER_LIMIT + NT36XXX_RECOVER_SLOW_TRIES) {
+		if (!ts->give_up) {
+			ts->give_up = true;
+			dev_err(ts->dev,
+				"sky: IC will not recover (%u attempts), parking until panel cycle/reboot\n",
+				ts->recover_tries);
+		}
+		return;
+	}
+
 	ts->recover_time = jiffies;
 	ts->recover_tries++;
 	ts->fw_reset_cnt = 0;
@@ -1423,8 +1526,15 @@ static void nt36xxx_health_work(struct work_struct *work)
 				      state, 6);
 		mutex_unlock(&ts->lock);
 
+		/*
+		 * 0xFD/0xFE/0xFF: the firmware reset.  Anything below REK
+		 * (0xA1) means the firmware is stuck before it ever scans - the
+		 * state a display off/on cycle leaves behind, and one that never
+		 * produces an interrupt, so this poll is the only detector.
+		 */
 		if (!ret && (state[0] == 0xFD || state[0] == 0xFE ||
-			     state[0] == 0xFF)) {
+			     state[0] == 0xFF ||
+			     state[0] < NT36XXX_STATE_REK)) {
 			if (++ts->health_bad >= 2)
 				nt36xxx_sky_schedule_recover(ts,
 							     "fw state reset");
@@ -1462,21 +1572,16 @@ static void nt36xxx_download_firmware(struct work_struct *work) {
 	mutex_lock(&ts->lock);
 
 	/*
-	 * Every attempt after the first one follows a failure, so the MCU may
-	 * be wedged: pulse the reset pin like the vendor does before a
-	 * download, otherwise the firmware never starts again.
+	 * Always use the retail reset ladder (0xAA / 0x5A / 0x55) before the
+	 * download.  With only the engineering reset the first init after
+	 * boot reliably ends in the 0xFE reset state, and the very same
+	 * ladder on the retry fixes it - so it belongs on every attempt, not
+	 * just the retries.
 	 */
-	if (ts->recover_tries || sky_fw_attempts) {
-		nt36xxx_hw_reset(ts);
-	} else {
-		/* Check and configure the touch screen chip */
-		ret = nt36xxx_eng_reset_idle(ts);
-		if (ret) {
-			dev_err(ts->dev, "Failed to check chip version\n");
-			mutex_unlock(&ts->lock);
-			goto skip;
-		}
-	}
+	if (ts->recover_tries || sky_fw_attempts)
+		nt36xxx_sky_dump_fw_history(ts);
+
+	nt36xxx_sky_recover_reset(ts);
 
 	/* Set memory maps for the specific chip version */
 	ret = nt36xxx_chip_version_init(ts);
@@ -1496,6 +1601,7 @@ static void nt36xxx_download_firmware(struct work_struct *work) {
 		ts->report_log_cnt = 0;
 		ts->fw_reset_cnt = 0;
 		ts->health_bad = 0;
+		ts->init_once = true;
 	}
 
 skip:
@@ -1522,6 +1628,41 @@ static void nt36xxx_disable_regulators(void *data)
 	regulator_bulk_disable(NT36XXX_NUM_SUPPLIES, ts->supplies);
 }
 
+
+/**
+ * sky_reinit_store - Force the panel-resume re-init from userspace
+ * @dev: SPI device
+ * @attr: Attribute description
+ * @buf: "1" to trigger
+ * @count: Size of @buf
+ *
+ * The retail recovery is driven by the panel: every screen-on re-flashes the
+ * firmware.  Boards (and userspace knobs) do not always produce a real DPMS
+ * cycle, so expose the same path directly for bring-up testing.
+ *
+ * Return: @count on success, negative number for error
+ */
+static ssize_t sky_reinit_store(struct device *dev,
+				struct device_attribute *attr, const char *buf,
+				size_t count)
+{
+	struct nt36xxx_ts *ts = dev_get_drvdata(dev);
+	unsigned int val;
+
+	if (kstrtouint(buf, 0, &val) || val != 1)
+		return -EINVAL;
+
+	dev_info(dev, "sky-reinit: re-running the IC init\n");
+	ts->give_up = false;
+	ts->recover_tries = 0;
+	ts->status &= ~NT36XXX_STATUS_DOWNLOAD_COMPLETE;
+	sky_fw_attempts = 0;
+	schedule_delayed_work(&ts->work, 0);
+
+	return count;
+}
+
+static DEVICE_ATTR_WO(sky_reinit);
 
 static int nt36xxx_input_dev_config(struct nt36xxx_ts *ts, const struct input_id *id)
 {
@@ -1550,6 +1691,8 @@ static int nt36xxx_input_dev_config(struct nt36xxx_ts *ts, const struct input_id
 	/* Set absolute parameters for touch events */
 	input_set_abs_params(ts->input, ABS_MT_PRESSURE, 0,
 						 TOUCH_MAX_PRESSURE, 0, 0);
+	input_set_abs_params(ts->input, ABS_MT_TOUCH_MAJOR, 0,
+						 NT36XXX_TOUCH_MAJOR_MAX, 0, 0);
 
 	/* Set absolute parameters for touch position */
 	input_set_abs_params(ts->input, ABS_MT_POSITION_X, 0,
@@ -1744,20 +1887,40 @@ skip_regulators:
 			 irq_get_trigger_type(ts->irq));
 	}
 
+	/* bring-up knob: replay the panel-resume re-init on demand */
+	ret = device_create_file(dev, &dev_attr_sky_reinit);
+	if (ret)
+		dev_warn(dev, "cannot create sky_reinit: %d\n", ret);
+
 	/* Set up delayed work for firmware download */
 	devm_delayed_work_autocancel(dev, &ts->work, nt36xxx_download_firmware);
 	devm_delayed_work_autocancel(dev, &ts->health_work, nt36xxx_health_work);
 
-	/* Schedule the delayed work */
-	schedule_delayed_work(&ts->work, 0);
 	schedule_delayed_work(&ts->health_work,
 			      msecs_to_jiffies(NT36XXX_HEALTH_PERIOD_MS));
 
-	/* If the device follows a DRM panel, configure panel follower */
+	/*
+	 * The retail driver defers its first firmware download until "after the
+	 * display reset (RESX) sequence", i.e. 14 s, because touching the IC
+	 * before the panel is up leaves it in its reset state.  We have the
+	 * panel callback, so the follower runs the init as soon as the panel is
+	 * prepared; the timer below is only the fallback for a board whose
+	 * panel never reports prepare.
+	 */
 	if (drm_is_panel_follower(dev)) {
 		ts->panel_follower.funcs = &nt36xxx_panel_follower_funcs;
 		devm_drm_panel_add_follower(dev, &ts->panel_follower);
 	}
+
+	/*
+	 * Retail defers its very first download to "after the display reset
+	 * (RESX) sequence": a 14 s delayed work with no callback involvement.
+	 * Our first attempt used to run at panel_prepared (~2.6 s), i.e. while
+	 * the DSI link and the first frames were still settling - measured as a
+	 * failure in every single boot, followed by recovery attempts that only
+	 * sometimes succeeded.  Use the retail value verbatim.
+	 */
+	schedule_delayed_work(&ts->work, msecs_to_jiffies(NT36XXX_FIRST_INIT_MS));
 
 	dev_info(dev, "Novatek touchscreen initialized\n");
 	return 0;
@@ -1813,10 +1976,12 @@ static int __maybe_unused nt36xxx_internal_pm_resume(struct device *dev)
 {
 	struct nt36xxx_ts *ts = dev_get_drvdata(dev);
 
-	/* some how reduced some kind of cpu, but remove checking should no harm */
-	if(ts->status & NT36XXX_STATUS_SUSPEND)
-		schedule_delayed_work(&ts->work, 0);
-
+	/*
+	 * Bookkeeping only.  The re-flash belongs to the "display turned on"
+	 * event (panel_enabled / pm_resume), because m19_prepare() only raises
+	 * the rails while the DSI init runs in m19_enable(); scheduling it any
+	 * earlier lands the download before the panel is ready.
+	 */
 	ts->status &= ~NT36XXX_STATUS_SUSPEND;
 	ts->quiet_init = false;
 
@@ -1836,6 +2001,9 @@ static int __maybe_unused nt36xxx_pm_resume(struct device *dev)
 
 	enable_irq(ts->irq);
 
+	if (ts->init_once)
+		mod_delayed_work(system_wq, &ts->work, msecs_to_jiffies(40));
+
 	ret = nt36xxx_internal_pm_resume(dev);
 	return ret;
 }
@@ -1847,6 +2015,8 @@ EXPORT_GPL_SIMPLE_DEV_PM_OPS(nt36xxx_pm_ops,
 static int panel_prepared(struct drm_panel_follower *follower)
 {
 	struct nt36xxx_ts *ts = container_of(follower, struct nt36xxx_ts, panel_follower);
+
+	dev_info(ts->dev, "sky-panel: prepared\n");
 
 	if (ts->status & NT36XXX_STATUS_SUSPEND)
 		enable_irq(ts->irq);
@@ -1862,6 +2032,8 @@ static int panel_unpreparing(struct drm_panel_follower *follower)
 {
 	struct nt36xxx_ts *ts = container_of(follower, struct nt36xxx_ts, panel_follower);
 
+	dev_info(ts->dev, "sky-panel: unpreparing\n");
+
 	ts->status |= NT36XXX_STATUS_SUSPEND;
 
 	disable_irq(ts->irq);
@@ -1869,8 +2041,54 @@ static int panel_unpreparing(struct drm_panel_follower *follower)
 	return nt36xxx_internal_pm_suspend(ts->dev);
 }
 
+/*
+ * The retail driver hangs its whole power state machine on the panel blank
+ * notifier, not on the rail events:
+ *
+ *   XIAOMI_PANEL_EARLY_EVENT_BLANK + blank=1 -> nvt_ts_suspend()  (IC sleeps)
+ *   XIAOMI_PANEL_NORMAL_EVENT_BLANK + blank=0 -> resume work, 40 ms later,
+ *                                                and it re-flashes the firmware
+ *
+ * The DRM equivalent of "display turned on" is drm_panel_enable(), i.e. the
+ * follower's panel_enabled: m19_prepare() only raises the rails, all DSI
+ * initialisation happens in m19_enable().  Implementing only prepared/
+ * unpreparing meant a screen-on cycle never reached this driver at all.
+ */
+static int panel_enabled(struct drm_panel_follower *follower)
+{
+	struct nt36xxx_ts *ts = container_of(follower, struct nt36xxx_ts, panel_follower);
+
+	dev_info(ts->dev, "sky-panel: enabled\n");
+
+	ts->give_up = false;
+	ts->recover_tries = 0;
+
+	/*
+	 * Retail re-flashes the firmware on every resume, 40 ms after the
+	 * unblank event.  The first bring-up is the exception: it stays on the
+	 * retail 14 s timer.
+	 */
+	if (ts->init_once)
+		mod_delayed_work(system_wq, &ts->work, msecs_to_jiffies(40));
+
+	return nt36xxx_internal_pm_resume(ts->dev);
+}
+
+static int panel_disabling(struct drm_panel_follower *follower)
+{
+	struct nt36xxx_ts *ts = container_of(follower, struct nt36xxx_ts, panel_follower);
+
+	dev_info(ts->dev, "sky-panel: disabling\n");
+
+	ts->status |= NT36XXX_STATUS_SUSPEND;
+
+	return nt36xxx_internal_pm_suspend(ts->dev);
+}
+
 static struct drm_panel_follower_funcs nt36xxx_panel_follower_funcs = {
 	.panel_prepared = panel_prepared,
+	.panel_enabled = panel_enabled,
+	.panel_disabling = panel_disabling,
 	.panel_unpreparing = panel_unpreparing,
 };
 

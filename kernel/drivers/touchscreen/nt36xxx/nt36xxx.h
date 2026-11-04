@@ -29,8 +29,15 @@
 #define TOUCH_MAX_FINGER_NUM	 10
 #define TOUCH_MAX_PRESSURE	 1000
 
-/* Point data length */
+/*
+ * Point data length: the ten six-byte points.  The retail driver reads 108
+ * bytes because of its super-resolution build, but on this firmware the bytes
+ * past the point block alias the event-buffer registers
+ * (0x22D00 + 96 is 0x22D60 = RESET_COMPLETE), so their "pressure" area is
+ * register content, not pressure.  Read only what carries data.
+ */
 #define POINT_DATA_LEN		65
+#define NT36XXX_TOUCH_MAJOR_MAX	255
 
 /*
  * Each report point is six bytes: status/id, X high, X low, Y high, Y low,
@@ -57,7 +64,9 @@ enum nt36xxx_chips {
 
 enum nt36xxx_cmds {
 	NT36XXX_CMD_ENTER_SLEEP = 0x11,
+	NT36XXX_CMD_SW_RESET = 0x55,
 	NT36XXX_CMD_BOOTLOADER_RESET = 0x69,
+	NT36XXX_CMD_SW_RESET_IDLE = 0xaa,
 };
 
 enum nt36xxx_events {
@@ -104,6 +113,7 @@ struct nt36xxx_abs_object {
 	u16 x;
 	u16 y;
 	u16 z;
+	u16 tm;		/* touch major (area), from the point's last byte */
 };
 
 struct nt36xxx_fw_info {

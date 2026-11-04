@@ -21,3 +21,12 @@ sky-initramfs.cpio.gz
 
 # release assets (built locally, uploaded by hand)
 dist/
+
+# third-party WLAN sources live in their own repositories
+third_party/
+# python + kernel module build leftovers
+__pycache__/
+*.pyc
+*.cmd
+*.tar.gz
+docs/wifi-handoff/artifacts/

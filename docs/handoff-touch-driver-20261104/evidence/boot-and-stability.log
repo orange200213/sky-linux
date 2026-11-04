@@ -1,0 +1,24 @@
+ 11:10:50 up 46 min,  0 users,  load average: 0.44, 0.23, 0.13
+2763.09 22080.43
+[    1.868164] nt36xxx-ml spi0.0: sky-irq: irq=155 trigger=0x1
+[    2.431937] nt36xxx-ml spi0.0: sky-repair: ILM round 0 bad=0/20
+[    2.592257] nt36xxx-ml spi0.0: sky-crc: flag=0x04 (done=1 ilm=0 dlm=0)
+[    2.599975] nt36xxx-ml spi0.0: sky-fwinfo: fw_ver=0x18 ~=0xE7 raw=18e710240438099c
+[    2.602026] nt36xxx-ml spi0.0: Touch IC fw loaded ok
+[    2.603692] nt36xxx-ml spi0.0: sky-report[0]: ffffffffffff state=a106e45480b8 irq_line=0
+[    3.018580] nt36xxx-ml spi0.0: sky-report[1]: fefefefefefe state=fefefefefefe irq_line=1
+[    3.033063] nt36xxx-ml spi0.0: sky-report[2]: fefefefefefe state=fefefefefefe irq_line=0
+[    3.067391] nt36xxx-ml spi0.0: sky-recover[1]: reports all 0xFD/0xFE, re-running IC init
+[    3.067915] nt36xxx-ml spi0.0: sky-fwhist[0]: fefefefefefefefefefefefefefefefe
+[    3.068364] nt36xxx-ml spi0.0: sky-fwhist[1]: fefefefefefefefefefefefefefefefe
+[    3.664876] nt36xxx-ml spi0.0: sky-repair: ILM round 0 bad=0/20
+[    3.744913] nt36xxx-ml spi0.0: sky-crc: flag=0x04 (done=1 ilm=0 dlm=0)
+[    3.747361] nt36xxx-ml spi0.0: sky-fwinfo: fw_ver=0x18 ~=0xE7 raw=18e710240438099c
+[    3.748162] nt36xxx-ml spi0.0: Touch IC fw loaded ok
+[    3.749087] nt36xxx-ml spi0.0: sky-report[0]: ffffffffffff state=a106e45480b8 irq_line=0
+[    4.087519] nt36xxx-ml spi0.0: sky-report[1]: 777777777777 state=a30ce45480b8 irq_line=0
+[    4.325397] nt36xxx-ml spi0.0: sky-report[2]: 777777777777 state=a30ce45480b8 irq_line=0
+--- irq ---
+ 155:      33751          0          0          0          0          0          0          0  msmgpio          13 Edge      spi0.0
+ 155:      33871          0          0          0          0          0          0          0  msmgpio          13 Edge      spi0.0
+0

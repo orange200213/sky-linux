@@ -23,13 +23,18 @@ already has the ROCKNIX SM4450 series applied (it `#include`s mainline
 ## Regenerating and building
 
 ```bash
-python3 tools/mksky_dts.py                      # regenerate the .dts
 KDIR=/path/to/linux-7.3 tools/dtsbuild.sh dts/sm4450-xiaomi-sky.dts build
+SKY_DTS_OUTPUT=/tmp/sky-generated.dts python3 tools/mksky_dts.py  # compare only
 ```
 
 `KDIR` must point at a kernel tree with the ROCKNIX SM4450 series applied — the
 board file includes `sm4450.dtsi` and the qcom `dt-bindings` headers.
 
-The generator is the source of truth: it applies each of the changes above
-programmatically so they are easy to review and to re-apply against a newer
-ROCKNIX board file.
+The Adrastea ICNSS2 conversion in this board file is currently a manual source
+change. `tools/mksky_dts.py` reads its ROCKNIX input and parser from the sibling
+`sky-mainline/` tree; its output still differs from this board file in WLAN,
+firmware paths, SPI and panel rails. It now refuses to overwrite a DTS containing
+`qcom,icnss`; use `SKY_DTS_OUTPUT` for an isolated comparison. Do not regenerate
+the board file until all current changes are reproduced and reviewed. A successful `dtc`
+compile is only a syntax/phandle check; the ch1 supply rail and WPSS/firmware
+runtime behavior are unverified.
