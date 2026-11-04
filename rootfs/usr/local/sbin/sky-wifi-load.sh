@@ -64,6 +64,10 @@ fi
 
 ip link set wlan0 up 2>/dev/null && log "wlan0 up"
 
+# Power save costs this link ~50x its latency (200 ms -> 4 ms RTT) and enough
+# loss that the TCP handshake of an inbound ssh never completes. Keep it off.
+iw dev wlan0 set power_save off 2>/dev/null && log "power_save off"
+
 # association + DHCP (only if a config with a network block is present)
 if [ -s "$WPA_CONF" ] && grep -q '^network=' "$WPA_CONF"; then
 	mkdir -p /var/run/wpa_supplicant

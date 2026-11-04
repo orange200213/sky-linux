@@ -43,7 +43,7 @@ set -e
 for s in devfs procfs sysfs;                  do rc-update add $s sysinit  >/dev/null; done
 for s in sky-initramfs fsck root localmount bootmisc hostname loopback \
          sky-adsp sky-modules networking;     do rc-update add $s boot     >/dev/null; done
-for s in sshd sky-udhcpd sky-console local sky-wifi; do rc-update add $s default >/dev/null; done
+for s in sshd sky-udhcpd sky-console local sky-wifi sky-timesync; do rc-update add $s default >/dev/null; done
 for s in sky-shutdown;                        do rc-update add $s shutdown >/dev/null; done
 '
 

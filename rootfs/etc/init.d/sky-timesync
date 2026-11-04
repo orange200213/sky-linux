@@ -1,0 +1,36 @@
+#!/sbin/openrc-run
+# The board has no usable RTC (/dev/rtc0 reads 1970), so /init can only seed the
+# clock from the rootfs mtime estimate, which can be an hour off. Once the WLAN
+# is up, step it properly with chrony.
+#
+# chronyd -q is one shot: query, step, exit. A trusted NTP server is allowed to
+# step; slewing an hour of offset would take months.
+
+description="Step the clock from NTP (needs the WLAN)"
+
+: "${ntp_server:=ntp.aliyun.com}"
+
+depend() {
+	after sky-wifi
+	after local
+}
+
+start() {
+	local out
+	ebegin "Syncing the clock from $ntp_server"
+	out=$(timeout 60 chronyd -q "server $ntp_server iburst" 2>&1)
+	printf '%s\n' "$out" > /log/sky-timesync.log
+	if [ $? -ne 0 ]; then
+		eend 1 "see /log/sky-timesync.log"
+		return 1
+	fi
+	eend 0
+	case "$out" in
+	*"System clock wrong by"*)
+		einfo "stepped: $(printf '%s\n' "$out" | sed -n 's/.*System clock wrong by \(.*\) (step).*/\1/p')"
+		;;
+	*)
+		einfo "clock already correct"
+		;;
+	esac
+}

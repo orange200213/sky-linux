@@ -70,7 +70,7 @@ Worst case the box alternates instead of looping. Retry by hand with
 ```
 sysinit : devfs procfs sysfs
 boot    : sky-initramfs fsck root localmount bootmisc hostname loopback sky-adsp sky-modules networking
-default : sshd sky-udhcpd sky-console local sky-wifi
+default : sshd sky-udhcpd sky-console local sky-wifi sky-timesync
 shutdown: sky-shutdown
 ```
 
@@ -91,6 +91,21 @@ started.
 `sky-initramfs` (boot runlevel) reaps exactly those, using a precise test: a
 process whose `/proc/<pid>/exe` link ends in ` (deleted)` came from the removed
 initramfs. It cannot match anything started from the rootfs.
+
+## Clock
+
+There is no usable RTC (`/dev/rtc0` reads 1970), so `/init` seeds the clock from
+the newest `/etc` mtime plus a minute, which is good enough to boot but can be an
+hour off. `sky-timesync` runs after `sky-wifi` and steps it properly:
+
+```sh
+chronyd -q "server ntp.aliyun.com iburst"   # query, step, exit
+```
+
+chrony rather than busybox `ntpd -q` (killed by its own alarm here) or openntpd
+(6.8 dropped `-s`, and slewing an hour of offset takes months). openntpd also
+needs an `ntp` user with a root-owned 0755 privsep directory, which the package
+does not create on this rootfs.
 
 ## Verifying
 
