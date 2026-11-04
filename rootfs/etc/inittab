@@ -1,0 +1,6 @@
+# /init is a symlink to /sbin/openrc-init, which does NOT read this file: it
+# runs the sysinit, boot and default runlevels itself and reaps orphans.
+#
+# The gadget serial console is provided by the sky-console service, not by an
+# inittab respawn entry. Kept as a stub so nobody looks for the old getty lines
+# here.

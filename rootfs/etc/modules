@@ -1,0 +1,5 @@
+# Modules loaded by the OpenRC "modules" service via modprobe.
+#
+# Empty on purpose: /lib/modules/<ver> has no modules.dep, so modprobe cannot
+# resolve anything here and both af_packet and ipv6 are built into this kernel.
+# The out-of-tree sky modules are insmod'ed by the sky-modules service.

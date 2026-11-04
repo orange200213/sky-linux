@@ -1,0 +1,11 @@
+# Interfaces brought up by the OpenRC "networking" service (ifupdown-ng).
+#
+# usb0 is the NCM gadget created by the initramfs; the address is static so the
+# host can always reach 192.168.7.1 over USB.
+
+auto lo
+iface lo inet loopback
+
+auto usb0
+iface usb0 inet static
+	address 192.168.7.1/24

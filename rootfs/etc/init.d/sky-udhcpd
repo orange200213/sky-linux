@@ -1,0 +1,28 @@
+#!/sbin/openrc-run
+# DHCP server for the USB gadget link, so the host always gets an address
+# on 192.168.7.0/24 without any manual setup.
+
+description="DHCP server for the USB gadget link (usb0)"
+
+command="/usr/sbin/udhcpd"
+command_args="-f /etc/udhcpd.conf"
+command_background="yes"
+pidfile="/run/udhcpd.pid"
+
+depend() {
+	need localmount
+	after networking
+	provide dhcp
+}
+
+start_pre() {
+	local i=0
+	while [ $i -lt 20 ] && [ ! -e /sys/class/net/usb0 ]; do
+		i=$((i + 1))
+		sleep 1
+	done
+	if [ ! -e /sys/class/net/usb0 ]; then
+		eerror "usb0 is not present"
+		return 1
+	fi
+}

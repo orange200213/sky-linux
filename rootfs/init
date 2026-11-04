@@ -1,89 +1,93 @@
 #!/bin/sh
-# sky-linux rootfs init (PID 1 after switch_root)
+# sky-linux: PID 1.
+#
+# Everything this box does at boot is an OpenRC service; this file only sets up
+# what the service manager needs and then hands over to openrc-init.
+#
+# Two things it must not assume:
+#
+#  * that the mount points exist. The rootfs image has shipped without /proc,
+#    /sys and /tmp, and this script used to mount with 2>/dev/null and silently
+#    boot a system with no /proc at all (no ptys, sshd half-working, OpenRC
+#    unable to run).
+#  * that the initramfs left anything mounted. It usually did, but that is a
+#    property of the boot image, not of this rootfs.
+#
+# Hence: mkdir everything, mount everything, ignore only real duplicates.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-# ADSP: the remoteproc auto-boot fires before switch_root, so /lib/firmware is
-# not there yet and it fails. Retry in the background until it stays up; the
-# battery/charger power supplies (pmic-glink -> battmgr) need it.
+
+mkdir -p /proc /sys /dev /run
+mount -t proc     proc     /proc    2>/dev/null
+mount -t sysfs    sysfs    /sys     2>/dev/null
+mount -t devtmpfs devtmpfs /dev     2>/dev/null
+
+mkdir -p /dev/pts /dev/shm /dev/mqueue
+mount -t devpts devpts /dev/pts 2>/dev/null
+mount -t tmpfs  tmpfs  /dev/shm 2>/dev/null
+
+# OpenRC keeps all of its state in /run, and Alpine's bootmisc wipes the
+# *underlying* /run directory on / (mount --bind / && rm -rf $dir/run/*) - that
+# is only safe when a tmpfs is mounted over it, which the initramfs used to do.
+# If /run stays on the ext4 root, bootmisc deletes /run/openrc/softlevel in the
+# middle of the boot runlevel and the "default" runlevel then believes OpenRC
+# never booted this system and refuses to start anything.
+mount -t tmpfs -o mode=0755,nosuid tmpfs /run 2>/dev/null
+
+# This board has no usable RTC: /dev/rtc0 reads 1970-01-05, so the clock starts
+# 56 years behind the rootfs files. OpenRC compares /etc mtimes with the clock
+# and then reports "clock skew" and re-caches the dependency tree on every
+# invocation, mid-boot. The rootfs' own newest /etc mtime is a sound lower
+# bound for "now" on a read-only-DTB device like this, and it also keeps TLS
+# (apk) working.
+if [ "$(date +%Y)" -lt 2024 ]; then
+	newest=0
+	for f in /etc/init.d/* /etc/conf.d/* /etc/rc.conf /etc/inittab /etc/fstab /etc/passwd; do
+		m=$(stat -c %Y "$f" 2>/dev/null) || continue
+		[ "$m" -gt "$newest" ] && newest=$m
+	done
+	# The dependency tree is written after this and must not look older than
+	# the /etc files OpenRC compares it with, so leave a margin.
+	[ "$newest" -gt 0 ] && date -u -s "@$((newest + 3600))" >/dev/null 2>&1
+fi
+
+if [ ! -x /sbin/openrc-init ]; then
+	echo "sky-init: /sbin/openrc-init missing, falling back to /init.pre-openrc" > /dev/kmsg
+	[ -f /init.pre-openrc ] && exec /bin/sh /init.pre-openrc
+	exec /bin/sh
+fi
+
+# PID 1's stdout is /dev/console, i.e. the gadget serial port. If the host is
+# not draining that port (ModemManager grabs /dev/ttyACM0 and only probes it),
+# a write to it blocks, and the boot stops at the first message OpenRC prints.
+# Give the service manager a file instead; the kernel still prints to the
+# console on its own.
+mkdir -p /var/log
+exec >>/var/log/openrc-boot.log 2>&1 </dev/null
+
+# Safety net: if OpenRC does not get sshd up, save what the box looked like and
+# put the old init back, so a bad boot costs one reboot instead of a manual
+# reflash. Nothing else in the boot can recover the box, because without sshd
+# there is no way in.
 (
 	i=0
 	while [ $i -lt 60 ]; do
 		i=$((i + 1))
-		for r in /sys/class/remoteproc/remoteproc*; do
-			[ "$(cat $r/name 2>/dev/null)" = adsp ] || continue
-			[ "$(cat $r/state 2>/dev/null)" = running ] && exit 0
-			/bin/busybox echo start > $r/state 2>/dev/null
-		done
-		/bin/busybox sleep 2
+		sleep 2
+		netstat -ltn 2>/dev/null | grep -q ':22 ' && exit 0
 	done
-) &
-mount -t proc     proc     /proc     2>/dev/null
-mount -t sysfs    sysfs    /sys      2>/dev/null
-mount -t devtmpfs devtmpfs /dev      2>/dev/null
-mkdir -p /dev/pts /dev/shm
-mount -t devpts   devpts   /dev/pts  2>/dev/null
-mount -t tmpfs    tmpfs    /dev/shm  2>/dev/null
-mkdir -p /run/sshd /var/empty /log
-
-# Wi-Fi (WCN6750): the WLAN firmware lives in the rootfs, so the WPSS
-# remoteproc auto-boot (before switch_root) and the ath11k probe both fail.
-# The helper starts WPSS and rebinds ath11k once /lib/firmware is readable.
-[ -x /usr/local/sbin/sky-wifi-up.sh ] && /usr/local/sbin/sky-wifi-up.sh &
-
-insmod /lib/modules/$(uname -r)/extra/ktd3136.ko 2>/dev/null
-insmod /lib/modules/$(uname -r)/extra/panel-xiaomi-m19.ko clock_khz=$(cat /etc/sky-panel-clock 2>/dev/null || echo 276180) 2>/dev/null
-hostname sky 2>/dev/null
-
-# USB network (the gadget itself is set up by the initramfs)
-if [ -d /sys/class/net/usb0 ]; then
-	ip link set usb0 up 2>/dev/null
-	ip addr add 192.168.7.1/24 dev usb0 2>/dev/null
-fi
-
-# keep the DHCP server alive so the host always gets an address
-if [ -x /usr/sbin/udhcpd ] && [ -c /sys/class/net/usb0 ]; then
-	cat > /run/udhcpd.conf <<'CONF'
-start 192.168.7.10
-end 192.168.7.50
-interface usb0
-lease_file /run/udhcpd.leases
-opt router 192.168.7.1
-opt dns 192.168.7.1
-CONF
-	udhcpd /run/udhcpd.conf 2>/dev/null
-fi
-
-# kill a sshd inherited from the initramfs: it holds :22 with a root that is gone
-pkill -f "/sbin/sshd" 2>/dev/null
-sleep 1
-[ -f /etc/ssh/ssh_host_ed25519_key ] || ssh-keygen -A >/dev/null 2>&1
-/usr/sbin/sshd 2>/dev/null
-echo "sky-rootfs: up ($(date -u +%H:%M:%S) UTC), ip $(ip -4 -br addr show usb0 2>/dev/null | awk '{print $3}')" > /dev/kmsg 2>/dev/null
-
-# root shell on the USB serial console, restarted on hangup
-while :; do
-	if [ -c /dev/ttyGS0 ]; then
-		setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1' 2>/dev/null
-	fi
-	sleep 1
-done
-
-# power key: kill the backlight as soon as the key goes down. Holding
-# vol-down + power makes the PMIC reset the SoC after ~10 s, and nothing in
-# Linux turns the panel off by itself, so the screen would keep glowing until
-# ABL takes over. A short tap toggles the screen like a normal phone.
-(
-	while :; do
-		ev=$($BB od -An -tu1 -N24 /dev/input/event1 2>/dev/null)
-		[ -z "$ev" ] && { $BB sleep 1; continue; }
-		set -- $ev
-		[ "$17" = "1" ] && [ "$19" = "116" ] || continue
-		[ "$21" = "1" ] || continue
-		bl=/sys/class/backlight/ktd3136-backlight
-		if [ "$(cat $bl/brightness)" = "0" ]; then
-			$BB cat $bl/max_brightness > $bl/brightness
-		else
-			$BB echo 0 > $bl/brightness
-		fi
-	done
+	{
+		date
+		echo "--- /proc/1/cmdline ---"; tr '\0' ' ' < /proc/1/cmdline; echo
+		echo "--- ps ---"; ps
+		echo "--- listeners ---"; netstat -ltn
+		echo "--- /run/openrc ---"; ls -la /run/openrc
+		echo "--- rc-status ---"; rc-status --all
+		echo "--- dmesg ---"; dmesg
+	} >/var/log/boot-failed.log 2>&1
+	echo "sky-init: sshd not up after 120s, restoring /init.pre-openrc and rebooting" > /dev/kmsg
+	[ -f /init.pre-openrc ] && cp -f /init.pre-openrc /init
+	sync
+	reboot -f
 ) &
 
+exec /sbin/openrc-init

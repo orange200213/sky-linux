@@ -62,6 +62,8 @@ kernel/        our kernel patches, debug-only patches, and the build config
  dts/          sm4450-xiaomi-sky.dts + the generator that produced it
 docs/         milestone write-ups; docs/handoff/ has the full display bring-up record
 initramfs/     the /init script and the initramfs build helper
+rootfs/        the deployed rootfs overlay (mirrors /), OpenRC services and the /init shim
+               tools/install-rootfs.sh pushes it; docs/openrc.md explains the boot
 kernel/       config, patch series, and the out-of-tree panel + backlight drivers
 tools/         payload/boot-image packers and the DTS build helper
 ```

@@ -1,0 +1,38 @@
+#!/sbin/openrc-run
+# Reap the sshd and DHCP server that the initramfs started.
+#
+# switch_root deletes the initramfs, but not the processes it started. Its sshd
+# and udhcpd keep holding :22 and :67, so the rootfs copies cannot bind them and
+# the box ends up unreachable even though every service "started".
+#
+# A process whose binary was deleted with the initramfs shows up as
+# /proc/<pid>/exe -> /path/to/binary (deleted). That is the exact set to reap,
+# and it can never match a process started from the rootfs.
+
+description="Release sockets held by the initramfs' sshd and dhcp server"
+
+depend() {
+	after devfs
+	before networking sshd sky-udhcpd sky-console
+}
+
+start() {
+	ebegin "Releasing sockets held by the initramfs"
+	local p exe cmd
+	for p in /proc/[0-9]*; do
+		exe=$(readlink "$p/exe" 2>/dev/null) || continue
+		case "$exe" in
+		*"(deleted)") ;;
+		*) continue ;;
+		esac
+		cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
+		case "$cmd" in
+		*sshd*|*udhcpd*)
+			pid=${p#/proc/}
+			einfo "  reaping $pid: $exe"
+			kill "$pid" 2>/dev/null
+			;;
+		esac
+	done
+	eend 0
+}

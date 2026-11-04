@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+# There is no hotplug device manager on this rootfs: the kernel's devtmpfs
+# already provides every device node, and the gadget/UFS/input nodes we use are
+# created by their drivers. This service exists only to satisfy the "dev"
+# virtual dependency of the stock hwdrivers and machine-id scripts, which are
+# otherwise unused here.
+
+description="Device node management (devtmpfs, no hotplug daemon)"
+
+depend() {
+	after devfs
+	provide dev
+}

@@ -1,0 +1,50 @@
+#!/sbin/openrc-run
+# ADSP remote processor.
+#
+# The firmware lives in the rootfs, so the remoteproc auto-boot that the kernel
+# does at ~0.4 s (before switch_root) fails with -ENOENT and never retries.
+# The battery/charger power supplies (pmic-glink -> battmgr) need the DSP up,
+# so start it here now that /lib/firmware is readable.
+
+description="Start the ADSP remote processor"
+
+depend() {
+	after devfs
+	before sky-modules
+}
+
+adsp_state() {
+	local r
+	for r in /sys/class/remoteproc/remoteproc*; do
+		[ "$(cat "$r/name" 2>/dev/null)" = adsp ] || continue
+		cat "$r/state" 2>/dev/null
+		return 0
+	done
+	return 1
+}
+
+start() {
+	ebegin "Starting ADSP remote processor"
+	local i=0 r state
+	while [ $i -lt 30 ]; do
+		for r in /sys/class/remoteproc/remoteproc*; do
+			[ "$(cat "$r/name" 2>/dev/null)" = adsp ] || continue
+			state=$(cat "$r/state" 2>/dev/null)
+			[ "$state" = running ] || echo start > "$r/state" 2>/dev/null
+			state=$(cat "$r/state" 2>/dev/null)
+		done
+		[ "$state" = running ] && break
+		i=$((i + 1))
+		sleep 1
+	done
+	[ "$state" = running ] && eend 0 || eend 1 "ADSP is ${state:-missing}"
+}
+
+status() {
+	if [ "$(adsp_state)" = running ]; then
+		einfo "ADSP is running"
+		return 0
+	fi
+	einfo "ADSP is not running"
+	return 3
+}

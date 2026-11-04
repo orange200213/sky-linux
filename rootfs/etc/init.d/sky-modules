@@ -1,0 +1,40 @@
+#!/sbin/openrc-run
+# Out-of-tree sky modules.
+#
+# /lib/modules/<ver> has no modules.dep (the extra/ tree is copied by hand from
+# the kernel build), so this uses insmod with an absolute path instead of
+# modprobe and /etc/modules.
+
+description="Load the out-of-tree sky modules"
+
+depend() {
+	after devfs
+	before networking
+}
+
+start() {
+	local kver f
+	kver=$(uname -r)
+
+	if lsmod | grep -q '^ktd3136'; then
+		einfo "ktd3136 already loaded"
+	else
+		f="/lib/modules/$kver/extra/ktd3136.ko"
+		ebegin "Loading ktd3136 backlight"
+		insmod "$f"
+		eend $?
+	fi
+
+	# panel-xiaomi-m19.ko is not built yet. When it is:
+	#	insmod "/lib/modules/$kver/extra/panel-xiaomi-m19.ko" \
+	#		clock_khz=$(cat /etc/sky-panel-clock)
+}
+
+status() {
+	if lsmod | grep -q '^ktd3136'; then
+		einfo "ktd3136 is loaded"
+		return 0
+	fi
+	einfo "ktd3136 is not loaded"
+	return 3
+}

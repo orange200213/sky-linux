@@ -1,0 +1,34 @@
+#!/sbin/openrc-run
+# Login console on the USB gadget serial port.
+#
+# openrc-init does not parse /etc/inittab and never spawns a getty, so the
+# console is an ordinary supervised service. supervise-daemon restarts getty
+# when a session ends.
+
+description="Login console on the USB gadget serial port (ttyGS0)"
+
+supervisor="supervise-daemon"
+command="/sbin/getty"
+command_args="-L 115200 ttyGS0 vt100"
+pidfile="/run/sky-console.pid"
+
+# keep respawning forever, unlike the global 5-per-30min default
+respawn_delay=1
+respawn_max=0
+
+depend() {
+	after bootmisc
+	before local
+}
+
+start_pre() {
+	local i=0
+	while [ $i -lt 20 ] && [ ! -c /dev/ttyGS0 ]; do
+		i=$((i + 1))
+		sleep 1
+	done
+	if [ ! -c /dev/ttyGS0 ]; then
+		eerror "/dev/ttyGS0 is not present"
+		return 1
+	fi
+}

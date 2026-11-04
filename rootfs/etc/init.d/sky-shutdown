@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+# Flush the filesystem on the way down.
+#
+# openrc-init runs this runlevel when PID 1 gets SIGTERM from reboot/poweroff.
+# Nothing else on this rootfs remounts / read-only, so at least force the ext4
+# journal out.
+
+description="Sync the filesystem before halt/reboot"
+
+depend() {
+	after *
+	keyword -timeout
+}
+
+stop() {
+	ebegin "Syncing filesystems"
+	sync
+	sync
+	eend 0
+}
