@@ -340,3 +340,93 @@ SSR 不再被触发（WPSS 保持 running）
 `cfg80211_disconnected` 前后 / `POST` 后。
 若阻塞发生在 `cm_remove_cmd` 之前 → 直接证明顺序问题；若在 HDD 内，
 再在 `hdd_cm_disconnect_complete_pre_user_update()` / `post_user_update()` 边界细分。
+
+---
+
+## 10. C2 已实现并上机验证：CM 层死锁已解决，暴露出下一层阻塞（HDD pre_user_update）
+
+### 10.1 实现（`qca-wifi-host-cmn/umac/mlme/connection_mgr/core/src/wlan_cm_disconnect.c`）
+
+```c
+struct cm_osif_disconn_notify {                 /* 新增 */
+	struct wlan_objmgr_vdev *vdev;
+	struct wlan_cm_discon_rsp resp;         /* 复制，脱离调用者栈 */
+};
+
+static QDF_STATUS cm_osif_disconn_notify_cb(struct scheduler_msg *msg)   /* 异步消费 */
+{
+	mlme_cm_osif_disconnect_complete(ctx->vdev, &ctx->resp);
+	wlan_objmgr_vdev_release_ref(ctx->vdev, WLAN_MLME_CM_ID);
+	qdf_mem_free(ctx);
+}
+
+static void cm_queue_osif_disconnect_notify(vdev, resp)
+{
+	ctx = qdf_mem_malloc(...); qdf_mem_copy(&ctx->resp, resp, ...);
+	wlan_objmgr_vdev_try_get_ref(vdev, WLAN_MLME_CM_ID);
+	msg.callback = cm_osif_disconn_notify_cb;
+	scheduler_post_message(QDF_MODULE_ID_OS_IF, QDF_MODULE_ID_OS_IF,
+			       QDF_MODULE_ID_OS_IF, &msg);        ← 关键：投到 OS_IF 队列
+}
+
+/* cm_notify_disconnect_complete() 里： */
+-	mlme_cm_osif_disconnect_complete(cm_ctx->vdev, resp);
++	cm_queue_osif_disconnect_notify(cm_ctx->vdev, resp);
+```
+
+要点：
+* `QDF_MODULE_ID_MLME` 队列在本 build（MCL）**不可用**，`scheduler_post_message` 直接失败
+  （实测 `sky-c2: failed to queue ...`）→ 必须用 `QDF_MODULE_ID_OS_IF`
+* 复制 `wlan_cm_discon_rsp` + 持 vdev ref，保证异步消费时数据有效
+* 内部状态清理（`cm_remove_cmd` / `qdf_event_set`）仍在同步路径里先完成
+
+### 10.2 效果（实测，正面对比）
+
+| 指标 | C2 之前 | C2 之后 |
+|---|---|---|
+| `cm_sm_deliver_event(DISCONNECT_DONE)` | **永不返回**（10 s 后 watchdog） | `<- … status=0` ✅ 立即返回 |
+| `Disconnect timeout with status 15` | 有 | **0 次** ✅ |
+| `scheduler_watchdog` 名称 | `cm_handle_disconnect_resp` | 变为 `cm_osif_disconn_notify_cb`（**新位置**） |
+| OSIF 通知 | 卡在 CM 锁内 | `sky-c2: queued …` → `sky-c2: osif disconnect complete (deferred)` ✅ 送达 |
+
+⇒ **提案 C2 的判断正确**：解除 CM 锁内同步调用后，原来的自死锁消失。
+
+### 10.3 新暴露的阻塞点：HDD `pre_user_update`
+
+```
+[156.993] sky-c2b: -> HDD pre_user_update
+（不再返回）→ watchdog: cm_osif_disconn_notify_cb
+wpss: offline（watchdog → cds_trigger_recovery → 强制 assert）
+Disconnect timeout = 0（CM 完成计数正常）
+```
+
+调用栈：`osif_disconnect_handler()` → `osif_cm_disconnect_comp_ind(vdev, rsp, OSIF_PRE_USERSPACE_UPDATE)`
+→ `hdd_cm_disconnect_complete_pre_user_update()`（`core/hdd/src/wlan_hdd_cm_disconnect.c:307`）
+其中依次调用（**下一个要定位的候选**）：
+
+```c
+hdd_conn_set_authenticated(adapter, false);
+hdd_napi_serialize(0);
+hdd_disable_and_flush_mc_addr_list(adapter, pmo_peer_disconnect);   ← ★ 最可疑（同步等 WMI PMO 响应）
+__hdd_cm_disconnect_handler_pre_user_update(adapter);               ← 内含 hdd_stop_tsf_sync / ipa evt / place_marker
+hdd_handle_disassociation_event(adapter, &rsp->req.req.bssid);
+wlan_rec_conn_info(...);
+hdd_ipa_set_tx_flow_info();
+```
+
+### 10.4 下一轮定位方法（一行插桩即可）
+
+在 `hdd_cm_disconnect_complete_pre_user_update()` 的上述 6 个调用前后各加
+`pr_err("sky-c2c: N before/after ...")`，重编重测，即可确认是 `hdd_disable_and_flush_mc_addr_list()`
+（PMO mc-list flush 同步等固件响应）还是 `hdd_handle_disassociation_event()`。
+
+⚠️ 注意与 C2 区分：**这是 HDD/PMO 层的新问题**，不是 C2 引入的回归；
+C2 修复本身应保留。
+
+### 10.5 本轮产物
+
+```
+wlan.ko（C2 + sky-c2b 边界插桩）  md5 f756cad75b141e56669747058e06929c
+源码  wlan_cm_disconnect.c（C2）、osif_cm_disconnect_rsp.c（sky-c2b）
+备份  wlan_cm_disconnect.c.bak-c2-20261104
+```
