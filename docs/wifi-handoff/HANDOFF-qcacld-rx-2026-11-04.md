@@ -171,3 +171,70 @@ QDF_STATUS lim_send_deauth_cnf(struct mac_context *mac_ctx)
 * 每次改模块都要重启（`CONFIG_MODULE_UNLOAD=n`）；断连卡死后 WPSS 会 offline 且 SSR 起不来
   （`-110`），只能重启；偶发落 fastboot 时用
   `fastboot flash boot_a sky-mainline/shim/out/sky-shim-boot-v4.img`
+
+---
+
+## 8. 2026-11-04 深夜：因果链全程打通，真正的卡点是 `cm_sm_deliver_event()` 阻塞（不是响应缺失）
+
+按提案要求逐节点取证（`sky-dbgA/B/C` 三组探针），**实测**结果：
+
+```text
+[162.416] dbgA: deauth_compl_handler tx_success=0 pMlmDeauthReq=set session=found retry=2
+[162.419] dbgA: posted WMA_DEAUTH_TX_COMP ret=0 bodyval=0
+[162.425] dbgA: LIM got WMA_DEAUTH_TX_COMP bodyval=0 bodyptr=ffff800088333c68
+[162.431] dbgA: lim_send_deauth_cnf entry pMlmDeauthReq=set
+[162.454] dbgA: lim_cm_send_disconnect_rsp #0 vdev=0          ← CM 响应确实发出
+[162.457] dbgB: cm_handle_disconnect_resp ENTER vdev=0
+[162.460] dbgB: cm_fill_disconnect_resp status=0
+[162.463] dbgB: calling wlan_cm_disconnect_rsp
+[162.528] dbgC: cm_disconnect_rsp active_cm_id=0xd000002 resp_cm_id=0xd000002 prefix=0xd000000
+[162.530] dbgC: -> cm_sm_deliver_event(DISCONNECT_DONE)
+（之后 10 s 无任何输出）
+[172.x  ] scheduler_watchdog: cm_handle_disconnect_resp exceeded 10s
+```
+
+### 8.1 结论：之前两个假设都被推翻
+
+| 假设 | 实测 |
+|---|---|
+| `mac_ctx->lim.limDisassocDeauthCnfReq.pMlmDeauthReq` 为 NULL 导致 `lim_send_deauth_cnf()` 早退 | **错**：`pMlmDeauthReq=set`，`lim_send_deauth_cnf()` 正常执行 |
+| CM 响应没有发出（`cm_handle_disconnect_resp` 从未被调用） | **错**：`lim_cm_send_disconnect_rsp #0 vdev=0` 已发出，`cm_handle_disconnect_resp` 已进入 |
+
+真正阻塞点（按调用栈）：
+
+```
+cm_handle_disconnect_resp()                        wlan_cm_vdev_disconnect.c:363
+  cm_fill_disconnect_resp()            OK (status=0)
+  wlan_cm_disconnect_rsp()                          qca-wifi-host-cmn/.../wlan_cm_api.c:104
+    cm_disconnect_rsp()                             .../wlan_cm_disconnect.c:782
+      cm_id 校验通过 (active 0xd000002 == resp 0xd000002)
+      cm_sm_deliver_event(vdev, WLAN_CM_SM_EV_DISCONNECT_DONE, ...)   ★ 永不返回
+        → wlan_cm_sm.c 的 DISCONNECTING 状态处理（:464 / :618 / :718 分支）
+        → cm_disconnect_complete() → cm_notify_disconnect_complete()
+        → mlme_cm_osif_disconnect_complete()   ← 疑似在 OS_IF 回调上下文里做同步/等待
+```
+
+而 `cm_handle_disconnect_resp()` 本身是 `lim_cm_send_disconnect_rsp()` 投递到
+**`QDF_MODULE_ID_OS_IF` 队列**的回调 ⇒ SM 处理里若再对同一队列/同一 serialization
+命令做「投递并等待」，就是**自死锁**（10s 后 scheduler watchdog 判定超时，
+进而 `cds_trigger_recovery_handler` 强制 assert FW，SSR 又起不来 → 只能重启）。
+
+### 8.2 修复方向（下一轮实现，需与提案确认）
+
+1. **首选**：让 CM 断连响应处理**不在 OS_IF scheduler 回调里跑**：
+   * 把 `lim_cm_send_disconnect_rsp()` 的目标模块从 `QDF_MODULE_ID_OS_IF` 改成
+     MAC/CM 模块队列（或 `scheduler_post_message` 到独立队列），
+   * 或在 `mlme_cm_osif_disconnect_complete()` 路径上改为**异步**（workqueue/消息），
+     彻底消除"回调内同步完成"。
+2. 备选：确认 serialization 是否在响应到达前就应释放 disconnect 命令
+   （`wlan_serialization_remove_cmd` 的时序），若是，则在 `lim_send_deauth_cnf()`
+   完成前释放，避免回调里再操作同一命令。
+3. **不要**采用"发出 deauth 就立刻响应 CM"的做法（提案已指出会破坏 completion 语义）。
+
+### 8.3 探针清单（本轮新增）
+
+| 标签 | 位置 | 作用 |
+|---|---|---|
+| `sky-dbgA` | `lim_send_management_frames.c`（deauth 完成 handler ×2、`lim_send_deauth_cnf` 入口）、`lim_process_message_queue.c`（`WMA_DEAUTH_TX_COMP` 到达）、`lim_send_sme_rsp_messages.c`（`lim_cm_send_disconnect_rsp` 计数） | 证明 legacy 链与 CM 响应投递 |
+| `sky-dbgB` | `wlan_cm_vdev_disconnect.c`（`cm_handle_disconnect_resp` 入口 / `cm_fill_disconnect_resp` 结果 / 调 `wlan_cm_disconnect_rsp` 前后） | 定位到 `wlan_cm_disconnect_rsp` 不返回 |
+| `sky-dbgC` | `wlan_cm_disconnect.c`（cm_id 校验、`cm_sm_deliver_event` 前后、`cm_disconnect_complete` 前后） | 定位到 `cm_sm_deliver_event` 阻塞 |
