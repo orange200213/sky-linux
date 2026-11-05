@@ -238,3 +238,105 @@ cm_handle_disconnect_resp()                        wlan_cm_vdev_disconnect.c:363
 | `sky-dbgA` | `lim_send_management_frames.c`（deauth 完成 handler ×2、`lim_send_deauth_cnf` 入口）、`lim_process_message_queue.c`（`WMA_DEAUTH_TX_COMP` 到达）、`lim_send_sme_rsp_messages.c`（`lim_cm_send_disconnect_rsp` 计数） | 证明 legacy 链与 CM 响应投递 |
 | `sky-dbgB` | `wlan_cm_vdev_disconnect.c`（`cm_handle_disconnect_resp` 入口 / `cm_fill_disconnect_resp` 结果 / 调 `wlan_cm_disconnect_rsp` 前后） | 定位到 `wlan_cm_disconnect_rsp` 不返回 |
 | `sky-dbgC` | `wlan_cm_disconnect.c`（cm_id 校验、`cm_sm_deliver_event` 前后、`cm_disconnect_complete` 前后） | 定位到 `cm_sm_deliver_event` 阻塞 |
+
+---
+
+## 9. 提案结论（已采纳）：采用 C2，拆分 CM 内部完成与 OSIF/用户态通知
+
+> 本节是提案方给出的最终决策，实现时以此为准。**§8 里"换投递队列"的想法降级为
+> 实现细节，不是根修复**；§4.4/§7 里关于 `pMlmDeauthReq` 的猜测已被实测否证。
+
+### 9.1 修正后的因果链（实测 + 源码）
+
+```
+WMA_DEAUTH_TX_COMP
+ → lim_send_deauth_cnf()
+ → lim_cm_send_disconnect_rsp()           (已发出，实测 #0 vdev=0)
+ → cm_handle_disconnect_resp()            (已进入)
+ → wlan_cm_disconnect_rsp() → cm_disconnect_rsp()
+ → cm_sm_deliver_event(WLAN_CM_SM_EV_DISCONNECT_DONE)      ★ 持有 cm_sm_lock
+ → cm_disconnect_complete()
+ → cm_notify_disconnect_complete()
+ → mlme_cm_osif_disconnect_complete() → osif_disconnect_handler()   ★ 阻塞
+ → (之后才会) cm_remove_cmd() / qdf_event_set(&cm_ctx->disconnect_complete)
+```
+
+### 9.2 两个结构性缺陷
+
+1. **OSIF/HDD 通知发生在 CM 状态机锁仍被持有时**
+   ```c
+   /* cm_sm_deliver_event() */
+   cm_lock_acquire(cm_ctx);
+   status = cm_sm_deliver_event_sync(cm_ctx, event, data_len, data);
+   cm_lock_release(cm_ctx);
+   ```
+   而 `cm_disconnect_complete()` 在锁内先调 `cm_notify_disconnect_complete()`
+   （内含 `mlme_cm_osif_disconnect_complete()`）。
+
+2. **serialization command 的移除晚于 OSIF 通知**
+   `cm_disconnect_complete()` 的执行顺序是：
+   `cm_notify_disconnect_complete()` → `cm_flush_pending_request()` →
+   `cm_remove_cmd()`（内部调 `wlan_serialization_remove_cmd()`）→
+   `qdf_event_set(&cm_ctx->disconnect_complete)`。
+   OSIF/HDD 若等待 CM 状态离开 DISCONNECTING、等待 serialization cmd 被移除、
+   或等待 `disconnect_complete` 事件，就形成**自锁**（10 s watchdog 完全吻合）。
+
+⇒ 根因**不是** CM 响应丢失，也**不是** deauth 请求保存方式；是 **completion 的后处理上下文与顺序**。
+
+### 9.3 C2 实现要点（给实现 prompt）
+
+目标形态：
+
+```
+cm_disconnect_complete()
+  → 更新 CM 内部状态
+  → cm_flush_pending_request() / cm_remove_cmd()   ← 内部清理提前
+  → qdf_event_set(&cm_ctx->disconnect_complete)
+  → 复制 wlan_cm_discon_rsp + 取 vdev ref
+  → 异步入队 OSIF 通知（不要在此处同步调用）
+  → 返回（cm_lock 由 cm_sm_deliver_event 释放）
+
+异步 worker / 独立队列
+  → osif_disconnect_handler()
+  → cfg80211_disconnected()
+  → HDD post-user cleanup
+  → 释放 response + vdev ref
+```
+
+具体改动点：
+
+| 文件 | 函数 | 改动 |
+|---|---|---|
+| `qca-wifi-host-cmn/umac/mlme/connection_mgr/core/src/wlan_cm_disconnect.c:552` | `cm_disconnect_complete()` | **重排顺序**：先 `cm_flush_pending_request()` / `cm_remove_cmd()` / `qdf_event_set()`，再入队 OSIF 通知 |
+| 同文件 `:533` | `cm_notify_disconnect_complete()` | 拆分：内部通知（`mlme_cm_disconnect_complete_ind`/`mlo_sta_link_disconn_notify`/`cm_if_mgr_inform_disconnect_complete`/`cm_inform_blm_disconnect_complete`/`cm_clear_vdev_mlo_cap`）保持同步；`mlme_cm_osif_disconnect_complete()` 改为**异步**（复制 resp + 持有 vdev ref） |
+| `wlan_cm_disconnect.c` | 新增 | 异步回调（worker 或专用 scheduler 队列消费），负责 OSIF/HDD 通知并释放资源 |
+| `qcacld-3.0/core/mac/src/pe/lim/lim_send_sme_rsp_messages.c:761` | `lim_cm_send_disconnect_rsp()` | 保持现状（**不要**靠改 `QDF_MODULE_ID_OS_IF` 目标来规避） |
+
+**禁止事项**（提案明确）：
+* 不要改成"deauth 发出即完成"（会绕过 cleanup 顺序、导致重复完成/早于内部清理的
+  `cfg80211_disconnected`、后续 connect 被拒、deauth 重试路径重复完成、SSR 并发重复响应）
+* 不要复用 legacy `pMlmDeauthReq`
+* 不要只换 scheduler 目标队列当作根修复
+
+### 9.4 实现后必须验证的验收点
+
+```
+cm_sm_deliver_event(DISCONNECT_DONE) 返回（不再 10s 不返回）
+cm_remove_cmd 完成
+disconnect_complete event 置位
+cfg80211_disconnected 返回
+无 scheduler watchdog
+无 "Disconnect timeout with status 15"
+无重复 disconnect response（lim_cm_send_disconnect_rsp 计数应 = 1 次/请求）
+SSR 不再被触发（WPSS 保持 running）
+```
+
+### 9.5 下一步探针（若要先用证据确认顺序假设，可选）
+
+在 `cm_disconnect_complete()` 内：
+`before cm_notify_disconnect_complete` / `before cm_remove_cmd` / `after cm_remove_cmd` /
+`before qdf_event_set` / `after qdf_event_set`；
+在 `osif_disconnect_handler()` 内：`entry` / `osif_cm_disconnect_comp_ind PRE` /
+`cfg80211_disconnected` 前后 / `POST` 后。
+若阻塞发生在 `cm_remove_cmd` 之前 → 直接证明顺序问题；若在 HDD 内，
+再在 `hdd_cm_disconnect_complete_pre_user_update()` / `post_user_update()` 边界细分。
