@@ -623,3 +623,48 @@ wlan.ko  62,487,1xx B   md5 92649de62b63f9d9de76293ebaf0ef47（含 C2 + NR_CPUS 
 备份     wlan_hdd_main.c.bak-nrcpus-20261104 / wlan_hdd_wmm.c.bak-nrcpus-20261104
          wlan_hdd_cm_disconnect.c.bak-c2c-20261104 / wlan_cm_disconnect.c.bak-c2-20261104
 ```
+
+---
+
+## 13. ✅ 固化：开机零干预自启达成（含 `sleep 20`、`&&` 串行、guard 自愈）
+
+### 13.1 改动
+
+| 文件 | 改动 |
+|---|---|
+| `/etc/init.d/sky-wifi` | `start()` 里 `sleep 10` → **`sleep 20`**；`start_pre()` 的 guard 改为**只在 pstore 有真实崩溃证据时才跳过**（`Internal error`/`Unable to handle kernel`/`kernel BUG at`/`Kernel panic`），否则清 marker 后**本次开机直接重试**；`start()` 结束时清 marker |
+| `/usr/local/sbin/sky-wifi-load.sh` | 三个 `insmod` 改为**严格 `&&` 串行**：`load_mod(wlan_firmware_service) && load_mod(icnss2) && wait_fw_ready && load_mod(wlan)`；任一环节失败整链中止并记日志；新增 `ensure_default_route()`（链路抖动后自动补回 `default via <gw> dev wlan0`） |
+
+两份文件的当前版本已归档到本目录 `install/sky-wifi-load.sh`、`install/sky-wifi.initd`。
+
+### 13.2 验证（重启后零干预，实测）
+
+```
+$ rc-service sky-wifi status
+ * wlan0 is up (192.168.1.186/24)
+
+$ tail -10 /log/wifi-load.log
+sky-wifi-load: wlan_firmware_service loaded
+sky-wifi-load: icnss2 loaded
+sky-wifi-load: WLAN FW is ready: 0x487
+sky-wifi-load: wlan loaded
+sky-wifi-load: wlan0 up
+sky-wifi-load: power_save off
+sky-wifi-load: wpa_supplicant started
+sky-wifi-load: wpa_state=COMPLETED
+sky-wifi-load: dhcp: 192.168.1.186/24
+sky-wifi-load: === done ===
+
+wpa_state=COMPLETED   wlan0 192.168.1.186/24   default via 192.168.1.1
+ping 1.1.1.1: 2/2, 0% loss, 4.1-5.9 ms
+```
+
+从冷启动到可上网全自动，无需人工 `rc-service` 干预。
+
+### 13.3 行为说明
+
+* `sleep 20`：给 WPSS remoteproc / udev / 其它 init 服务留出稳定时间后再 insmod
+* `&&` 串行：`wlan_firmware_service` → `icnss2` →（等 `WLAN FW is ready`）→ `wlan`，
+  前一步失败绝不继续，避免半加载状态
+* guard：真的崩溃（pstore 有证据）→ 跳过本次、下次再试；只是被手动重启打断 → 同次开机重试
+* 备用恢复通道：`usb0 = 192.168.7.1/24` 始终可用（WiFi 挂了也能 SSH 进去）

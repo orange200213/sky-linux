@@ -1,0 +1,82 @@
+#!/sbin/openrc-run
+# WLAN bring-up: mainlined qcacld-3.0 + icnss2 (the ath11k path is gone).
+#
+# Runs last; nothing depends on it. insmod of the 62 MB wlan.ko can bus-abort the
+# box, and by then sshd, the serial getty and the DHCP server are already up, so a
+# failure here cannot take the box away.
+#
+# Guard: the marker exists only while the stack is being loaded. If it is found at
+# the next boot the previous boot died during bring-up -- but only skip when the
+# crash is backed by pstore evidence, otherwise bring the stack up in the same boot
+# (an interrupted load, e.g. a manual reboot, must not cost a whole boot).
+
+description="WLAN bring-up (qcacld-3.0 + icnss2)"
+
+marker="/var/lib/sky-wifi/in-progress"
+loader="/usr/local/sbin/sky-wifi-load.sh"
+
+wlan_addr() {
+	ip -4 addr show wlan0 2>/dev/null | awk '/inet /{print $2; exit}'
+}
+
+depend() {
+	after *
+	after local
+}
+
+start_pre() {
+	if [ -e "$marker" ]; then
+		if grep -aqiE "Internal error|Unable to handle kernel|kernel BUG at|Kernel panic" /sys/fs/pstore/* 2>/dev/null; then
+			ewarn "the previous boot crashed while the WLAN stack was loading"
+			ewarn "skipping this boot so the box stays reachable; evidence:"
+			ewarn "  /log/wifi-load.log  /sys/fs/pstore"
+			ewarn "the guard is cleared now, the next boot will try again"
+			rm -f "$marker"
+			return 1
+		fi
+		ewarn "previous WLAN bring-up was interrupted (no crash evidence) - retrying now"
+		rm -f "$marker"
+	fi
+	checkpath -d /var/lib/sky-wifi
+	mkdir -p /log
+}
+
+start() {
+	ebegin "Bringing up WLAN (qcacld-3.0 + icnss2)"
+	sleep 20
+	: > "$marker"
+	sync
+	"$loader" >>/log/sky-wifi-console.log 2>&1
+	rc=$?
+	rm -f "$marker"
+	if [ "$rc" -eq 0 ]; then
+		eend 0
+		[ -n "$(wlan_addr)" ] && einfo "wlan0 $(wlan_addr)"
+	else
+		eend 1 "see /log/wifi-load.log"
+	fi
+}
+
+stop() {
+	# CONFIG_MODULE_UNLOAD=n: the stack cannot be torn down. Drop the clients
+	# and clear the guard, so an ordinary shutdown does not look like a crash.
+	rm -f "$marker"
+	start-stop-daemon --stop --exec /usr/sbin/wpa_supplicant --quiet 2>/dev/null
+	start-stop-daemon --stop --exec /sbin/udhcpc --quiet 2>/dev/null
+	return 0
+}
+
+status() {
+	local a
+	a=$(wlan_addr)
+	if [ -n "$a" ]; then
+		einfo "wlan0 is up ($a)"
+		return 0
+	fi
+	if [ -e /sys/class/net/wlan0 ]; then
+		einfo "wlan0 exists but has no IPv4 address"
+		return 3
+	fi
+	einfo "wlan0 is not present"
+	return 3
+}
