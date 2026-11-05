@@ -92,3 +92,82 @@ rootfs       /dev/sda20 ext4（已重建；/proc /sys /tmp 目录已补齐）
 | `core/dp/htt/htt_t2h.c`（`MGMT_TX_COMPL_IND`） | `sky-dbg4: MGMT_TX_COMPL_IND arrived len=.. mgmt_over_wmi=..` | 管理帧完成事件是否到达 |
 
 正式版可按这些字符串 `grep -n "sky-dbg" -r` 一次性清除。
+
+---
+
+## 7. 2026-11-04 晚更新：断连链路已逐步验证，卡点最终锁定在 `lim_send_deauth_cnf()`
+
+### 7.1 结论：整条"帧→完成事件→回调"链路是好的，缺的是最后一步 CM 响应
+
+用插桩逐段验证（都是实测 on device）：
+
+```text
+[162.395] [PE] Deauth TX: vdev 0 seq_num 2051 reason 3 waitForAck 1
+[162.411] sky-dbg7: mgmt_txrx_compl desc=63 status=0 tx_cb=0 ota_cb=1 ctx=1
+[162.414] sky-dbg9: deauth_tx_complete_cnf_handler tx_success=0 buf=yes
+[162.420] sky-dbg9: lim_deauth_tx_complete_cnf tx_success=0
+[162.455] OSIF: wlan0(vdevid-0): locally-generated disconnect … cm_id 0xd000002
+[179.432] scheduler_watchdog_notify: Callback cm_handle_disconnect_resp exceeded 10s   ← 仍然卡
+[185.316] cm_disconnect_start_req_sync: Disconnect timeout with status 15
+```
+
+已确认为**正常**的环节（不再是怀疑对象）：
+
+| 环节 | 实测 |
+|---|---|
+| 管理帧发送 | 走 WMI 路线，不是 HTT（`MGMT_TX_COMPL_IND` 从未出现属正常） |
+| WMI 完成事件 | `WMI mgmt_tx_compl desc_id=63 status=0`，帧内容确认是 `fc=0x00c0` deauth |
+| ota 回调注册 | `tx_cb=0 ota_cb=1`（deauth 走 ota 完成回调） |
+| deauth 完成回调 | `lim_deauth_tx_complete_cnf_handler(tx_success=0)` → `lim_deauth_tx_complete_cnf` |
+| `desc_id` 恒为 63 | 三个帧（auth/assoc/deauth）都是 63，但帧内容各不相同，属于固件侧重用，不是 bug |
+
+### 7.2 卡点：`lim_send_deauth_cnf()` 早退
+
+```c
+QDF_STATUS lim_send_deauth_cnf(struct mac_context *mac_ctx)
+{
+	deauth_req = mac_ctx->lim.limDisassocDeauthCnfReq.pMlmDeauthReq;
+	if (deauth_req) {        /* ← 为空则整段跳过：不停 timer、不发 cnf */
+		…
+	}
+	…
+}
+```
+
+而 `pMlmDeauthReq` **只在 legacy 路径** `lim_send_management_frames.c:3523`
+（`lim_process_mlm_deauth_req()`）里被赋值。CM 路径
+（`lim_process_nb_disconnect_req()` → `lim_prepare_and_send_deauth()` →
+`lim_process_disconnect_sta()` → …）是否走到那个赋值点，是下一个要确认的问题。
+
+若确实没赋值，则 `lim_send_deauth_cnf()` 什么都不做 →
+`LIM_MLM_DEAUTH_CNF` 不发 → `cm_handle_disconnect_resp` 永不被调用 → 10s watchdog。
+
+### 7.3 下一轮（两小步即可收口）
+
+1. 在 `lim_send_deauth_cnf()` 里加一行：打印 `deauth_req` 是否为 NULL、`sessionId`、结果
+   （若 NULL 即为确诊）；同时在 `lim_process_mlm_deauth_req()` 里打印是否被调用。
+2. 修复方案（二者选一，建议 A）：
+   * **A**：在 CM 断连完成路径里直接调 `lim_cm_send_disconnect_rsp(mac_ctx, vdev_id)`
+     （`lim_send_sme_rsp_messages.c:761` 已有该函数），即 CM 断连不再依赖 legacy 的
+     `pMlmDeauthReq`/`pMlmDisassocReq` 机制。`vdev_id` 在
+     `lim_prepare_and_send_deauth()` 里可从 `req->req.vdev_id` 拿到，可存到 session 或
+     新增一个小字段。
+   * **B**：在 `lim_prepare_and_send_deauth()` 里把对应请求塞进
+     `mac_ctx->lim.limDisassocDeauthCnfReq.pMlmDeauthReq`，让 legacy cnf 流程照常跑完。
+
+### 7.4 本轮其它产出
+
+* `/etc/init.d/sky-wifi` 的 `start()` 里加了 `sleep 10`（备份 `sky-wifi.bak-20261104`），
+  服务实测 24.5s 起完，`COMPLETED` + DHCP + ping 正常
+* 插桩一览（用 `grep -rn sky-dbg core/` 可一次清掉）：
+  `sky-dbg3` ol_tx_send.c（数据面完成计数）/ lim_process_sme_req_messages.c（断连请求）；
+  `sky-dbg4` htt_t2h.c（MGMT_TX_COMPL_IND 是否到达）；
+  `sky-dbg5` ol_tx.c（mgmt cb 注册 / mgmt send）+ wma_mgmt.c（WMI 完成事件）；
+  `sky-dbg6` wma_mgmt.c（完成处理 + 帧类型）；
+  `sky-dbg7` wlan_mgmt_txrx_tgt_api.c（tx_cb/ota_cb 是否存在）；
+  `sky-dbg8` lim_send_management_frames.c（disassoc 路径，实测不触发）；
+  `sky-dbg9` lim_send_management_frames.c（**deauth 路径，实测会触发**）
+* 当前设备镜像：`/root/wlan.ko` = md5 `1f9660d89f3c00f1ec36812ab553875c`（含 dbg3~dbg9）
+* 每次改模块都要重启（`CONFIG_MODULE_UNLOAD=n`）；断连卡死后 WPSS 会 offline 且 SSR 起不来
+  （`-110`），只能重启；偶发落 fastboot 时用
+  `fastboot flash boot_a sky-mainline/shim/out/sky-shim-boot-v4.img`
