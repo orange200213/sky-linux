@@ -430,3 +430,108 @@ wlan.ko（C2 + sky-c2b 边界插桩）  md5 f756cad75b141e56669747058e06929c
 源码  wlan_cm_disconnect.c（C2）、osif_cm_disconnect_rsp.c（sky-c2b）
 备份  wlan_cm_disconnect.c.bak-c2-20261104
 ```
+
+---
+
+## 11. 第二轮定位（按提案要求：成对探针 + 内核栈）：阻塞在 `qdf_periodic_work_stop_sync()`
+
+### 11.1 六处成对探针结果（`sky-c2c`）
+
+```
+[178.135] [1/6] -> hdd_conn_set_authenticated      [178.136] <- 
+[178.138] [2/6] -> hdd_napi_serialize              [178.140] <- 
+[178.142] [3/6] -> hdd_disable_and_flush_mc_addr_list [178.143] <- 
+[178.145] [4/6] -> __hdd_cm_disconnect_handler_pre_user_update [178.147] <-
+[178.149] [5/6] -> hdd_handle_disassociation_event     ← 无出口 ★
+（[6/6] hdd_ipa_set_tx_flow_info 从未执行）
+```
+
+⇒ 提案要求的"只在第一个有入口无出口的函数内加第二层探针"用得上：
+**第 5 项 `hdd_handle_disassociation_event()` 就是阻塞点**。
+（PMO/NAPI 清理均已正常返回，提案关于"不要预设 PMO"的判断正确。）
+
+### 11.2 内核栈（`sysrq-w` 阻塞任务 + `sysrq-l` NMI 背trace，实测）
+
+**A. 我们的调用线程**（`scheduler_threa`，OS_IF 调度线程，state:D）：
+
+```
+qdf_periodic_work_stop_sync+0x2c/0x44            [wlan]   ← 卡在这里
+__hdd_bus_bw_compute_timer_stop+0x38/0x14c
+hdd_bus_bw_compute_timer_try_stop+0x70/0x74
+hdd_handle_disassociation_event+0x8c/0x1bc               ← [5/6]
+hdd_cm_disconnect_complete_pre_user_update+0x128/0x1e4
+hdd_cm_disconnect_complete+0x50/0xc0
+osif_cm_disconnect_comp_ind+0x28/0x40
+osif_disconnect_handler+0x194/0x294
+osif_cm_disconnect_complete_cb+0x10/0x1c
+mlme_cm_osif_disconnect_complete+0x28/0x40
+cm_osif_disconn_notify_cb+0x40/0x80              ← C2 的异步回调
+scheduler_os_if_mq_handler / scheduler_thread
+```
+
+**B. 被等待的那次 periodic work**（NMI 采样，仍在执行中）：
+
+```
+pc : hdd_bus_bw_work_handler+0x3e0/0x618 [wlan]   (P)
+  __qdf_periodic_work_handler+0x1c/0x50 [wlan]
+```
+
+**C. 另一条同点阻塞**（SSR 路径，`irq/17-smp2p-wp` state:D）：
+
+```
+qdf_periodic_work_stop_sync → __hdd_bus_bw_compute_timer_stop
+ → hdd_bus_bw_compute_timer_stop → hdd_soc_recovery_cleanup → wlan_hdd_pld_uevent
+```
+
+### 11.3 机理分析
+
+`qdf_periodic_work_stop_sync()`（`qca-wifi-host-cmn/qdf/linux/src/qdf_periodic_work.c:136`）：
+
+```c
+	pwork->msec = 0;
+	while (cancel_delayed_work_sync(&pwork->dwork))
+		;
+```
+
+而 `__qdf_periodic_work_handler()` 每次执行完会按 `pwork->msec` **自重新排队**：
+
+```c
+	pwork->callback(pwork->context);
+	msec = pwork->msec;
+	if (msec)
+		schedule_delayed_work(&pwork->dwork, msecs_to_jiffies(msec));
+```
+
+⇒ 若 `hdd_bus_bw_work_handler()` 内部**重新启动定时器**（例如结束处再次
+`qdf_periodic_work_start()`/`hdd_bus_bw_compute_timer_start()` 把 `msec` 写回非 0），
+`cancel_delayed_work_sync()` 会不停返回 true → 死循环；
+若 handler 本身长时间不返回（NMI 显示它仍在 `hdd_bus_bw_work_handler+0x3e0`），
+`cancel_delayed_work_sync()` 就一直等它 → 两条栈同时出现。
+
+两者的共同点：**在 OSIF 回调上下文里做同步等待**（本项目第 4 次遇到同类问题）。
+
+### 11.4 下一轮要做的判定（两选一，各一轮）
+
+1. **判定 handler 是否自重启**：在 `hdd_bus_bw_work_handler()` 入口/出口打印
+   `hdd_ctx->bus_bw_work.msec`，并在 `qdf_periodic_work_start()` 里计数。
+   若出口前 `msec` 又变成非 0 ⇒ 自重启循环确认。
+2. **判定 handler 是否长时间不返回**：在 `__hdd_bus_bw_work_handler()` 内部按段打点
+   （`wlan_hdd_validate_context` / 各 adapter 统计 / `hdd_pld_request_bus_bandwidth` /
+   `cdp_*`），找出它停在哪一段（NMI 的 `+0x3e0` 偏移可对照反汇编）。
+
+### 11.5 候选修复（待判定后选）
+
+| 方案 | 说明 | 风险 |
+|---|---|---|
+| **A**（推荐先试） | 断连路径改用 `qdf_periodic_work_stop_async()`（`wlan_hdd_cm_disconnect.c:80` 的 `hdd_bus_bw_compute_timer_try_stop` 调用点），不在 OSIF 回调里同步等 | 定时器可能稍后再跑一次，需确认无副作用 |
+| **B** | 给 `struct qdf_periodic_work` 加 `stopping` 标志，handler 在 stopping 时不再自重启，`stop_sync` 结束后清标志 | 改动 QDF 公共层，需回归其他 periodic work |
+| **C** | 把 `hdd_handle_disassociation_event()`（或其中 timer stop）移出 OSIF 回调上下文（与 C2 同思路，异步化） | 改动面更大，但语义最干净 |
+
+⚠️ 不建议：跳过 bus-bw 清理、延长 watchdog、或用 `stop_async` 后不处理后续状态。
+
+### 11.6 本轮产物
+
+```
+wlan.ko（C2 + sky-c2b + sky-c2c）  md5 8d78453c14292aa1ce6ddfdbd6b70929
+备份  wlan_hdd_cm_disconnect.c.bak-c2c-20261104
+```
