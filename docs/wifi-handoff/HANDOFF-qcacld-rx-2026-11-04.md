@@ -535,3 +535,91 @@ qdf_periodic_work_stop_sync → __hdd_bus_bw_compute_timer_stop
 wlan.ko（C2 + sky-c2b + sky-c2c）  md5 8d78453c14292aa1ce6ddfdbd6b70929
 备份  wlan_hdd_cm_disconnect.c.bak-c2c-20261104
 ```
+
+---
+
+## 12. ✅ 根因确认并修复：`uint8_t` 计数器溢出 `NUM_CPUS`(=512) 导致 bus-bw worker 死循环
+
+### 12.1 符号化结论（提案要求的第一步）
+
+用本次构建的 `wlan.ko`（未剥离，带调试信息）反汇编 `hdd_bus_bw_work_handler+0x3e0`：
+
+```asm
+; wlan_hdd_main.c:11147  if (!hdd_ctx->config->mscs_pkt_threshold) return;
+546a8: ldr  x0, [x19, #104]        ; hdd_ctx->config
+546ac: ldr  w0, [x0, #10224]       ; config->mscs_pkt_threshold
+546b0: cbz  w0, 546b8              ; ==0 -> 跳过
+; wlan_hdd_main.c:11150  for (cpu = 0; cpu < NUM_CPUS; cpu++)
+546b4: b    546b4                  ; ★ 自跳转 = 编译器证明的无限循环
+```
+
+源码（`hdd_send_mscs_action_frame()`）：
+
+```c
+uint8_t cpu;                                    /* ← 0..255 */
+for (cpu = 0; cpu < NUM_CPUS; cpu++)            /* NUM_CPUS = NR_CPUS = 512 */
+	tx_vo_pkts += stats->per_cpu[cpu].tx_classified_ac[SME_AC_VO];
+```
+
+`CONFIG_NR_CPUS=512`（本机内核 `.config`）+ `#define NUM_CPUS NR_CPUS`（`wlan_hdd_main.h:250`）
+⇒ `uint8_t` 在 255 回绕，`cpu < 512` **永真** ⇒ 编译器生成 `b .`（无限自旋）。
+
+`mscs_pkt_threshold` 默认 **1200**（非 0，`hdd_dp_cfg.h:373`），所以**每个已连接 STA 的
+bus-bw worker 都会进入该死循环**——这也解释了为什么设备一直有 ~1.0 的 load average，
+以及为什么 `qdf_periodic_work_stop_sync()`（`cancel_delayed_work_sync` 等活跃 handler 退出）
+永远等不到。
+
+### 12.2 修复
+
+```diff
+--- a/core/hdd/src/wlan_hdd_main.c   (hdd_send_mscs_action_frame)
+-	uint8_t cpu;
++	/* sky: uint8_t wraps at 256 while NUM_CPUS == NR_CPUS (512) -> infinite loop */
++	int cpu;
+
+--- a/core/hdd/src/wlan_hdd_wmm.c     (两处 cpu < NUM_CPUS 循环)
+-	uint8_t cpu;
++	int cpu;
+```
+
+（`grep -n "NUM_CPUS" core/hdd/src/*.c` 只有这三处循环；全部已修。）
+
+### 12.3 上机验证（实测，全部通过）
+
+```
+[5/6] -> hdd_handle_disassociation_event
+[5/6] <- hdd_handle_disassociation_event      ← 16 ms 返回（修复前永不返回）
+[6/6] -> / <- hdd_ipa_set_tx_flow_info
+
+scheduler_watchdog               : 0
+"Disconnect timeout with status 15": 0
+wpss state                       : running（不再崩溃、不再 SSR）
+load average（修复前 ~1.0）      : 0.14
+重新 up + reassociate            : wpa_state=COMPLETED, inet 192.168.1.186/24
+ping 1.1.1.1                     : 3/3, 0% loss, 4.5–5.7 ms
+两次断连的 CM 响应计数            : #0, #1 —— 每次请求恰好 1 次，无重复响应
+```
+
+### 12.4 最终修复清单（本次 WiFi 主线化全过程）
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | icnss2 `Fail to get IRQ-0` | `platform_get_resource` → `platform_get_irq` |
+| 2 | qcacld `cfg_parse` 失败 → probe -1 | ini 放 `/lib/firmware/wlan/qca_cld/WCNSS_qcom_cfg.ini` |
+| 3 | NAPI 注册时 oops | `INIT_LIST_HEAD(&dev->napi_list)` + `reg_state` |
+| 4 | 3 条 NAPI teardown WARNING | `napi_disable()` before `netif_napi_del()` |
+| 5 | BDF/REGDB 下载失败 | 固件文件被 USB 传成全零（非代码问题）→ md5 校验 |
+| 6 | **断连卡死 → watchdog → FW assert → SSR -110** | **C2：OSIF 通知移出 CM SM 锁（异步）** |
+| 7 | **bus-bw worker 死循环（本次根因）** | **`uint8_t cpu` → `int cpu`（3 处）** |
+
+> 说明：C2 与 #7 是两个独立缺陷。#7 是断连路径"永不返回"的直接原因；
+> C2 修的是"OSIF 通知在 CM 状态机锁内同步执行"这一结构性隐患（提案结论），
+> 两者都保留。
+
+### 12.5 产物
+
+```
+wlan.ko  62,487,1xx B   md5 92649de62b63f9d9de76293ebaf0ef47（含 C2 + NR_CPUS 修复 + 探针）
+备份     wlan_hdd_main.c.bak-nrcpus-20261104 / wlan_hdd_wmm.c.bak-nrcpus-20261104
+         wlan_hdd_cm_disconnect.c.bak-c2c-20261104 / wlan_cm_disconnect.c.bak-c2-20261104
+```
