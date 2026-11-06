@@ -25,6 +25,7 @@ mainline driver, no DT node, or both.
 | **Camera** | `CONFIG_QCOM_CAMSS` is not enabled and there are no `cci`/`csiphy`/`camss` nodes in our DTS | the vendor DT has `csiphy0..2` (`qcom,csiphy-v1.2.3`) + `cci0@ac15000` + 3 `qcom,cam-sensor` slots. Mainline has no SM4450 CAMSS support yet. Sensors in §4. |
 | **Audio** | `CONFIG_SND_SOC=y` but no sound card, no codec node, no LPASS | the codec is **WCD937x** (vendor DT: `qcom,wcd937x-codec`, `qcom,wcd937x-slave`). Needs an ASoC machine driver + codec + LPASS macro/tx-macro bring-up. |
 | **Modem / calls / SMS / mobile data** | no MPSS remoteproc node in our DTS (only ADSP and WPSS exist) | MPSS would need `qcom,sm4450-mpss-pas`, the `modem.mdt` split firmware from `NON-HLOS.bin`, and a data path (rmnet) — a large project on its own. |
+| **Touch on other variants** | the same vendor build also ships `focaltech_8725_fw.bin` + `focaltech_ft8720/8725_hx.ini`, i.e. some Redmi 12 5G variants use a **FocalTech** controller instead of the Novatek NT36672C — another reason the touch recipe here is JP-unit specific |
 | **Bluetooth (WCN6750)** | M9, not started | `hci_qca` already matches `qcom,wcn6750-bt`; needs `enable-gpios`, the BT firmware from the vendor partition and the WPSS/AON state that Wi-Fi already sets up. |
 | **Fingerprint** | no driver | the vendor DT carries **two** variants: `fpc,fpc1020` and `goodix,fingerprint` (side-mounted). The vendor split-firmware also has `fpctzappfingerprint.b*` (TEE app), so the sensor itself is likely FPC on this unit. |
 | **NFC** | no driver | **NXP SN100/SN220** — the vendor image ships `libnfc-SN220.conf`, `libnfc-mtp-SN100*.conf`, `nfc_nci.nqx.default.hw.so`, `vendor.nxp.hardware.nfc@2.0-service` and `init_nfc_sn1xxx.rc`; our DT has only the `nfc_enable` pinctrl group. Mainline has no SN100 driver (only `nfcsim`/PN544 class). |
@@ -70,8 +71,31 @@ The camera HAL ships one module per sensor variant, and the names carry the part
 | `cam-sensor2` — aux | **OV02B10** (`m19_truly_ov02b10`), **OV2180** (`m19_sunny_ov2180`) — 2 MP class |
 
 So the phone is a 50 MP main + 2 MP aux + (8 MP or 5 MP) front design with **three
-second-source options for the main camera**. Which one this unit has needs a probe of the CCI
-bus (or reading the sensor EEPROM) — the images cannot tell us.
+second-source options for the main camera**.
+
+### Which main camera does *our* unit have? Not determinable from the images
+
+Checked and ruled out (2026-11-06, in TWRP):
+
+* `dtbo_a/b` — only names panel variants (`m19_36_02_0a_fhd_dsc_vid`, `m19_42_03_0b/0c`), no
+  camera strings;
+* `/vendor/etc/camera/` — CamX configs, AI-ISP models and Xiaomi goldens
+  (`golden_aac_s5kjn1_wide_ii.bin`, `golden_ofilm_ov48b2q_wide_i.bin`,
+  `golden_sunny_s5kjn1_wide_i.bin`), i.e. IQ-validation files for **S5KJN1** (AAC / Sunny) and
+  **OV48B2Q** (Ofilm) wide modules — these add two more candidates but do not say what is
+  fitted;
+* `/persist/camera/` — empty on this unit;
+* `cust`, `opconfig`, `build_*.prop` — no camera/sensor identifiers;
+* `/data` — was taken over by our mainline rootfs, so the Android CamX logs are gone.
+
+The three ways to settle it:
+
+1. **Boot stock Android once** and read the log:
+   `adb logcat -d | grep -iE "camxsensor|camera.*sensor_open|probe.*sensor"` (CamX prints the
+   module name it opened, e.g. `m19_truly_ov50d40`);
+2. **Read the sensor ID over CCI** once a CAMSS driver exists for SM4450 (the sensor's chip-id
+   register is at a well-known I²C address per part);
+3. **Physical inspection** (teardown photos of the main module).
 
 ## 5. How to reproduce this inventory
 

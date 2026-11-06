@@ -111,6 +111,8 @@ fastboot flash boot_a /path/to/stock/boot.img
 | Variant tested | Japanese-market Redmi 12 5G (`sky`), stock **`sky_jp_global_images_OS1.0.13.0.UMWJPXM_14.0`** (HyperOS 1.0.13 / Android 14); panel/touch/firmware values are from that unit only |
 | Firmware | UEFI (EDK2) on `uefi_a`, application processors start via PSCI |
 
+Firmware inventory (what exists on the phone and where): `docs/firmware-inventory.md`.
+
 Still missing (sensors, camera, audio, modem, BT, fingerprint, NFC, haptics, GPU, video):
 `docs/status-unimplemented.md` — includes the sensor and camera part numbers identified from
 the stock firmware.
