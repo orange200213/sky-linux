@@ -39,7 +39,7 @@ Everything here was developed and verified on real hardware.
 | **M6** power / charging | ✅ works | ADSP firmware + QRTR + pd-mapper + pmic-glink, `battery`/`qcom-battmgr-*` power supplies — [details](docs/m6-power.md) |
 | **M7** touch (Novatek SPI) | 🚧 **partial** | NT36672C (Tianma M19) on QUPv3 wrapper 1 SE1 via GPI DMA, mainline regmap driver, SPI soft reset, bounded first-frame wait and runtime recovery. Verified **only on the `m19` panel** and **only from raw `/dev/input/event3` (`dd`) output** — never yet through a desktop/window manager, and the IC can still enter its own reset state once per long session (it heals itself in ≈1.3 s) — [details](docs/m7-touch.md), [2026-11-06 handoff](docs/handoff-20261106.md) |
 | **M8** Wi-Fi (WCN6750) | ✅ works *(still being optimised — bugs can appear at any time)* | Wi-Fi works through the out-of-tree **`qcacld-3.0`** stack ported to this kernel: [`sky-qcacld-3.0-mainline`](https://github.com/orange200213/sky-qcacld-3.0-mainline). The pure-mainline `ath11k` route is **closed** (hardware: the APSS cannot reach the CE/UMAC registers on this SNOC variant) — [why](docs/wifi-handoff/FINDINGS-session9-shadow-reg-confirmed.md), [qcacld handoff](docs/wifi-handoff/HANDOFF-qcacld-mainline.md), [status log](docs/m8-wifi.md) |
-| **M9** Bluetooth (WCN6750) | ⬜ not started | `hci_qca` supports `qcom,wcn6750-bt`; needs `enable-gpios`, the vendor BT firmware and the WPSS state |
+| **M9** Bluetooth (WCN6750) | ⬜ not started | `hci_qca`/`btqca` support `qcom,wcn6750-bt` and the stack is built in; the `bluetooth` node is `disabled` and still uses vendor-style properties, and the `qca/msbtfw*.mbn` + `qca/msnv*.bin` firmware has to be pulled from the `bt_firmware` partition — [handoff](docs/bt-handoff/HANDOFF.md) |
 
 Current boot chain:
 
@@ -162,3 +162,10 @@ deliberately minimal.
 * `docs/wifi-handoff/HANDOFF-snoc-mainline.md` - historical record of the **closed** mainline
   ath11k port (kept as evidence, with every trap that cost time)
 * `docs/wifi-handoff/NEXT-PROMPT.md` - ready-to-paste brief for a fresh session
+
+### Bluetooth (M9)
+
+* `docs/bt-handoff/HANDOFF.md` - the `uart2` + `qcom,wcn6750-bt` node as built, what
+  `hci_qca` really needs (enable-gpios, nine mainline rail names), the firmware naming for
+  `QCA_WCN6750` and how to iterate with DT overlays instead of flashing
+* `docs/bt-handoff/NEXT-PROMPT.md` - ready-to-paste brief for a fresh session
