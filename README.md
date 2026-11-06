@@ -36,7 +36,7 @@ Everything here was developed and verified on real hardware.
 | **M4** UFS storage | ✅ works | `userdata` (ext4, 108 GiB) mounted read/write, persistent logs |
 | **M5** display (DPU/DSI/panel) | ✅ works | DPU 8.6 + DSI 2.6 + `m19` panel at 1080x2460@90 with DSC, KTD3136 backlight, fbcon on `msmdrmfb` — [details](docs/m5-display.md) |
 | **M6** power / charging | ✅ works | ADSP firmware + QRTR + pd-mapper + pmic-glink, `battery`/`qcom-battmgr-*` power supplies — [details](docs/m6-power.md) |
-| **M7** touch (Novatek SPI) | 🚧 **partial** | NT36672C (Tianma M19) on QUPv3 wrapper 1 SE1 via GPI DMA, mainline regmap driver, runtime recovery. Verified **only on the `m19` panel** and **only from raw `/dev/input/event3` (`dd`) output** — never yet through a desktop/window manager, and the controller can still drop out (recovery exists, root cause of the IC death is not fully explained) — [details](docs/m7-touch.md) |
+| **M7** touch (Novatek SPI) | 🚧 **partial** | NT36672C (Tianma M19) on QUPv3 wrapper 1 SE1 via GPI DMA, mainline regmap driver, SPI soft reset, bounded first-frame wait and runtime recovery. Verified **only on the `m19` panel** and **only from raw `/dev/input/event3` (`dd`) output** — never yet through a desktop/window manager, and the IC can still enter its own reset state once per long session (it heals itself in ≈1.3 s) — [details](docs/m7-touch.md), [2026-11-06 handoff](docs/handoff-20261106.md) |
 | **M8** Wi-Fi (WCN6750) | ✅ works *(still being optimised — bugs can appear at any time)* | Wi-Fi works through the out-of-tree **`qcacld-3.0`** stack ported to this kernel: [`sky-qcacld-3.0-mainline`](https://github.com/orange200213/sky-qcacld-3.0-mainline). The pure-mainline `ath11k` route is **closed** (hardware: the APSS cannot reach the CE/UMAC registers on this SNOC variant) — [why](docs/wifi-handoff/FINDINGS-session9-shadow-reg-confirmed.md), [qcacld handoff](docs/wifi-handoff/HANDOFF-qcacld-mainline.md), [status log](docs/m8-wifi.md) |
 | **M9** Bluetooth (WCN6750) | ⬜ not started | `hci_qca` supports `qcom,wcn6750-bt`; needs `enable-gpios`, the vendor BT firmware and the WPSS state |
 
@@ -101,7 +101,7 @@ fastboot flash boot_a /path/to/stock/boot.img
 | Item | Value |
 |------|-------|
 | SoC | Qualcomm SM4450 (ravelin), 4×A55 + 4×A78 |
-| RAM | 4/6/8 GB LPDDR4X, low bank at `0x80000000` |
+| RAM | 4 GB unit tested: five segments declared, **~3.2 GB usable** (`free -m` → 3259 MB); low bank at `0x80000000` |
 | Display | 1080×2460 LCD, `m19` panel, DSI, KTD3136 backlight |
 | Framebuffer left by ABL | `0xb8000000`, stride 4320, 43 MiB "splash region" |
 | Storage | UFS 4.0, 2 lanes, `/dev/sda` = 117 GiB LUN with `userdata` (108 GiB) |

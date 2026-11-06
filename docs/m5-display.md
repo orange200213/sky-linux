@@ -100,3 +100,10 @@ packet, exactly what the vendor programs.
 * Single backlight device and a brightness curve; suspend/resume with panel sleep
   in/out.
 * Optional 60 Hz mode.
+
+### Panel 1.8 V rail must stay on
+
+`vreg_panel_1p8` (fixed regulator, `gpio97` = the stock `qcom,oled-vdd1v8-gpio`, fed from
+`vreg_l21b_1p8`) is declared **`regulator-always-on`**. Without that the rail drops between
+touch/panel init attempts and the touch controller comes up half-powered (its `sky-crc`
+read-back turns into garbage). See `docs/handoff-20261106.md`.

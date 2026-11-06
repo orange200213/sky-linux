@@ -26,8 +26,10 @@ and from running Linux on the device.
 
 | Item | Value |
 |------|-------|
-| Low RAM bank | `0x80000000` + `0x68e00000` (1.6 GiB) — this is what the DTS declares |
-| Rest of RAM | above `0xF1300000` (holes in between; not declared yet) |
+| RAM declared in the DTS | five segments, matching a **4 GB** unit (see below) |
+| Usable RAM measured | `free -m` → **3259 MB** total (`/proc/meminfo` agrees) |
+| Low RAM bank | `0x80000000` + `0x68e00000` (1.6 GiB) |
+| High segments | `0xF1300000 + 0x0ED00000`, `0x8_00000000 + 0x3FE00000`, `0x8_40000000 + 0x3C700000`, `0x8_7CD00000 + 0x01E00000` |
 | Kernel load address (shim) | `0xC0000000` (inside the declared bank) |
 | DTB load address | right after the kernel `Image` + its `.bss`, 2 MiB aligned |
 | `ramoops` | `0x97700000`, 2 MiB |
@@ -72,6 +74,7 @@ and from running Linux on the device.
 | SS/DP PHY | QMP combo `@0x88e8000` — `disabled` in the vendor DT as well |
 | Roles | peripheral only for now (`dr_mode = "peripheral"`, no role switch) |
 | Gadget | CDC ACM `/dev/ttyGS0` + CDC NCM `usb0` (192.168.7.1/24) |
+| IOMMU / DMA | `iommus = <&apps_smmu 0x540 0x0>;` + `dma-coherent`. Without it, enabling the high memory segments makes the gadget fail with `dwc3-qcom a600000.usb: unknown endpoint event 0` |
 
 ## PMIC / power
 

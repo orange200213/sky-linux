@@ -24,9 +24,13 @@ under a desktop yet".
 
 Because of the two points above this milestone is marked **partial**, not done.
 
-Reference image: `shim/out/sky-shim-boot-v4-dt-final.img`
-(sha256 `831227eb…`), built with kernel `7.3.0` (`Image` sha256 `a5f13f9b75048675…`) and the
-driver in `kernel/drivers/touchscreen/nt36xxx/` (core `62bf354e0f0b7717…`, 2098 lines).
+Reference image: `shim/out/sky-shim-boot-v4-touch-usbdma4g.img`
+(sha256 `006d8d0b440f6b9e2f88c83a014eaaa036b42a7bac659cbc1d5f3c607b5f9180`), DTB
+`sm4450-xiaomi-sky-usbdma4g.dtb` (`b677968bbf2f9ac1…`), built with the driver in
+`kernel/drivers/touchscreen/nt36xxx/` (core `9a8449eaa84b28ee…`, 2116 lines).
+See `docs/handoff-20261106.md` for that session. Previous reference:
+`shim/out/sky-shim-boot-v4-dt-final.img` (`831227eb…`, driver core `62bf354e0f0b7717…`,
+2098 lines).
 The handoff package with the technical write-up, the evidence logs and the DTS node is
 `docs/handoff-touch-driver-20261104/`. Older references: the runtime-recovery build
 `sky-shim-boot-v4-recover-hwreset.img`
@@ -41,7 +45,7 @@ fix `sky-shim-boot-v4-touch-ok.img` (`a16ce9e9…`).
 | Bus | QUPv3 **wrapper 1, SE1** at `0xa84000`, `qcom,geni-spi` |
 | SPI interrupt | GIC SPI **354** (level high) |
 | Touch interrupt | TLMM **gpio13**, active low (`irq-gpios`) |
-| Reset | TLMM **gpio12** (`reset-gpios`); the retail board has no hardware reset line in use, the driver uses **SPI soft reset** and only the pinctrl pull on gpio12 |
+| Reset | **SPI soft reset only** — as of the 2026-11-06 driver GPIO12 is *not* requested at all (`ts->reset_gpio = NULL`), matching the vendor driver, which also leaves the pin unclaimed |
 | Pins | gpio26 SCLK, gpio27 CS, gpio50 MISO, gpio51 MOSI, function `qup1_se1` |
 | SE clocks | `GCC_QUPV3_WRAP1_S1_CLK` (19.2 MHz), `GCC_QUPV3_WRAP1_CORE_CLK` |
 | Wrapper clocks | `GCC_QUPV3_WRAP_1_M_AHB_CLK`, `GCC_QUPV3_WRAP_1_S_AHB_CLK` |
@@ -175,6 +179,25 @@ Behaviour that differs from the vendor driver on purpose (all measured):
 | `0x77` idle pattern | treated as a firmware reset | **ignored** | on this IC the idle frame really is `0x77`; treating it as a reset re-flashed every idle frame |
 | gestures / double-tap wake | yes | not implemented | needs `wakeup-source` + an input-event hook |
 | stylus / factory test | yes | not implemented | not needed for basic touch |
+
+First-initialisation handling was reworked on 2026-11-06 (`docs/handoff-20261106.md`):
+
+* `nt36xxx_report_is_live()` — `0x77` is this firmware's **valid idle frame**, while
+  `0xfd`/`0xfe` (and uniform `0xff`) mean the IC is still in reset. Before this, *any*
+  non-`fd/fe` read counted as "usable", so a half-initialised controller could be published
+  as downloaded.
+* `nt36xxx_wait_first_report()` returns a bool and waits up to 100 × 5 ms (≈500 ms) for a live
+  frame; on timeout the download is **not** marked complete, so the next panel cycle retries
+  instead of leaving an IRQ storm behind.
+* the `ReK` (reset-state) check is fatal now: `sky: IC failed to reach ReK` aborts the
+  download rather than continuing with a half-initialised IC.
+* the panel's 1.8 V rail (`vreg_panel_1p8`, gpio97) is `regulator-always-on`, so the touch
+  supply does not disappear between init attempts.
+
+One runtime recovery per long session is still observed and heals itself in ≈1.3 s
+(`sky-recover[1]: reports all 0xFD/0xFE` → fresh download → `fw_ver=0x18` → `state=a3…`), with
+`errors=0 timedout=0` in the SPI statistics — i.e. the IC entering its own reset state, not a
+transport error.
 
 Why the regmap port rather than the vendor import: it caps transfers at
 `spi_max_transfer_size()` instead of handing the controller one multi-kilobyte buffer, which

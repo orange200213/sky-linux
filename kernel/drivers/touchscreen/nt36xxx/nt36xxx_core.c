@@ -667,33 +667,48 @@ static bool nt36xxx_report_is_fw_reset(const u8 *point)
 	return true;
 }
 
+static bool nt36xxx_report_is_live(const u8 *point)
+{
+	int i;
+
+	/* 0x77 is this firmware's valid idle frame. */
+	if (point[0] == 0x77)
+		return true;
+
+	/* A real point has a non-uniform six-byte record. */
+	for (i = 1; i < 6; i++) {
+		if (point[i] != point[0])
+			return true;
+	}
+
+	return point[0] != 0xff && point[0] != 0xfd && point[0] != 0xfe;
+}
+
 static void nt36xxx_sky_schedule_recover(struct nt36xxx_ts *ts, const char *why);
 
 /**
  * nt36xxx_wait_first_report - Wait for a live report area before enabling IRQ
  * @ts: Main driver structure
  *
- * The reset-state register reports ReK before the first frame is written, so
- * poll the report area itself while the interrupt is still masked.  This is
- * the deterministic form of the settle time that only existed accidentally in
- * the earlier diagnostic builds.  The wait is short (20 x 5 ms) and not fatal:
- * the runtime recovery covers an IC that is still silent afterwards.
+ * ReK may be reported before the first frame is written. The transition can
+ * briefly read as all 0xff/0xfe; keep IRQ masked until a live frame appears.
  */
-static void nt36xxx_wait_first_report(struct nt36xxx_ts *ts)
+static bool nt36xxx_wait_first_report(struct nt36xxx_ts *ts)
 {
 	u8 point[8] = { 0 };
 	int i;
 
-	for (i = 0; i < 20; i++) {
+	for (i = 0; i < 100; i++) {
 		if (regmap_raw_read(ts->regmap, ts->mmap[MMAP_EVENT_BUF_ADDR],
 				    point, sizeof(point)))
-			return;
-		if (!nt36xxx_report_is_fw_reset(point))
-			return;
+			return false;
+		if (nt36xxx_report_is_live(point))
+			return true;
 		usleep_range(5000, 6000);
 	}
 
-	dev_info(ts->dev, "sky: report area still idle, enabling IRQ anyway\n");
+	dev_err(ts->dev, "sky: report area did not reach a live frame\n");
+	return false;
 }
 
 /**
@@ -1364,10 +1379,16 @@ check_fw:
 	 * here: the bounded runtime recovery covers that case.
 	 */
 	ret = nt36xxx_check_reset_state(ts, NT36XXX_STATE_REK);
-	if (ret)
-		dev_warn(ts->dev, "sky: IC late in reaching ReK, continuing\n");
-	else
-		nt36xxx_wait_first_report(ts);
+	if (ret) {
+		/* FWINFO can be readable while the IC is still stuck in INIT.
+		 * Do not publish a half-initialized download as usable: doing so
+		 * suppresses the next panel-cycle reinit and leaves touch dead. */
+		dev_err(ts->dev, "sky: IC failed to reach ReK\n");
+		goto release_fw_buf;
+	}
+
+	if (!nt36xxx_wait_first_report(ts))
+		goto release_fw_buf;
 
 	dev_info(ts->dev, "Touch IC fw loaded ok");
 
@@ -1759,12 +1780,9 @@ int nt36xxx_probe(struct device *dev, int irq, const struct input_id *id,
 	if (!ts->supplies)
 		return -ENOMEM;
 
-	/* Get and configure the optional reset GPIO */
-	ts->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
-	if (IS_ERR(ts->reset_gpio))
-		return PTR_ERR(ts->reset_gpio);
-
-	gpiod_set_consumer_name(ts->reset_gpio, "nt36xxx reset");
+	/* This board uses the controller's SPI soft-reset command.  Do not
+	 * claim GPIO12: the vendor driver leaves it unrequested. */
+	ts->reset_gpio = NULL;
 
 	/* Get and configure the optional IRQ GPIO */
 	ts->irq_gpio = devm_gpiod_get_optional(dev, "irq", GPIOD_IN);
