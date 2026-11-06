@@ -68,16 +68,31 @@ uart2: serial@988000 {
 
    * `BTFM.bin` in the stock package is **not enough**: it is a FAT image with only the older
      `ap*`/`cm*`/`cr*` stems.
-   * The device's own `bt_firmware` (Android keeps it in a `bt_firmware` partition that
-     appears as `/vendor/bt_firmware/`) is the source of truth. Inventory it in TWRP:
+   * **Inventory done (2026-11-06, TWRP):** the phone has a dedicated **`bluetooth_a`
+     partition** (`/dev/block/by-name/bluetooth_a`, FAT16, ~1.1 MB; Android mounts it at
+     `/vendor/bt_firmware`). It contains 30 files and **no `ms*` files at all**:
 
-     ```sh
-     ls /vendor/bt_firmware            # or mount /dev/block/by-name/bt_firmware
-     # expected: msbtfw12.mbn / msnv12.bin (or .tlv)
+     ```
+     apbtfw10.tlv  apbtfw11.tlv  apnv10.bin  apnv11.bin
+     cmbtfw12/13.tlv (+.ver)     cmnv12/13*.bin
+     crbtfw11/20/21.tlv          crnv11/20/21.bin
      ```
 
-   * The vendor image references `msbtfw12.tlv` and `msnv10.bin`, which suggests rom 0x12 is
-     what this chip reports.
+     A copy now lives outside git at `~/redmi125g/firmware-jp-2024/bt/` (checksums in
+     `SHA256SUMS.txt` next to it).
+
+   * **Therefore the `qcom,wcn6750-bt` path cannot find firmware on this device** (it asks for
+     `qca/msbtfw<rom>.mbn` + `qca/msnv<rom>.bin`). The pragmatic route is to bind the node as
+     **`qcom,wcn3990-bt`** (or wcn3991/3998), for which `btqca` requests
+     `qca/crbtfw%02x.tlv` + `qca/crnv%02x.bin` — exactly the files that exist here
+     (`crbtfw11/20/21`, `crnv11/20/21`). Which rom version is used depends on the chip's
+     version response; install all three pairs and let the driver pick:
+
+     ```sh
+     cp crbtfw1{1}.tlv crbtfw2{0,1}.tlv crnv1{1}.bin crnv2{0,1}.bin  /lib/firmware/qca/
+     ```
+   * Keep the `qcom,wcn6750-bt` compatible in the DT as a fallback experiment, but expect
+     `-ENOENT` on the patch upload.
 
 ## 3. Iterating without a full flash cycle
 

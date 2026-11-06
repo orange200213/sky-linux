@@ -27,7 +27,7 @@ mainline driver, no DT node, or both.
 | **Modem / calls / SMS / mobile data** | no MPSS remoteproc node in our DTS (only ADSP and WPSS exist) | MPSS would need `qcom,sm4450-mpss-pas`, the `modem.mdt` split firmware from `NON-HLOS.bin`, and a data path (rmnet) — a large project on its own. |
 | **Bluetooth (WCN6750)** | M9, not started | `hci_qca` already matches `qcom,wcn6750-bt`; needs `enable-gpios`, the BT firmware from the vendor partition and the WPSS/AON state that Wi-Fi already sets up. |
 | **Fingerprint** | no driver | the vendor DT carries **two** variants: `fpc,fpc1020` and `goodix,fingerprint` (side-mounted). The vendor split-firmware also has `fpctzappfingerprint.b*` (TEE app), so the sensor itself is likely FPC on this unit. |
-| **NFC** | no driver | vendor strings point at an **NXP SN100** (34 hits, plus `nfc_nci`/`pn557` library strings); DT has only the `nfc_enable` pinctrl group. |
+| **NFC** | no driver | **NXP SN100/SN220** — the vendor image ships `libnfc-SN220.conf`, `libnfc-mtp-SN100*.conf`, `nfc_nci.nqx.default.hw.so`, `vendor.nxp.hardware.nfc@2.0-service` and `init_nfc_sn1xxx.rc`; our DT has only the `nfc_enable` pinctrl group. Mainline has no SN100 driver (only `nfcsim`/PN544 class). |
 | **Haptics (linear motor)** | no driver | `aw8695` (AWINIC) appears in the vendor image; the motor is not modelled in our DT. |
 | **GPU (Adreno 613)** | node exists but `status = "disabled"` | no 3D acceleration; the display pipeline (DPU) does not need it. `CONFIG_DRM_MSM=y` is built, so the work is DT (GMU/OPP/IOMMU) + firmware (`a615_zap.mbn`-style) bring-up. |
 | **Video encode/decode (Venus)** | `CONFIG_VIDEO_VENUS` not set, no DT node | not startable without the firmware (`venus.mdt`) and the SM4450 Venus compatible. |
@@ -40,17 +40,23 @@ The AP DT has no sensor nodes because they sit behind the sensor DSP. The part n
 recoverable from the vendor partition: the SSC registry entries are JSON files named
 `jsonsky_<driver>_<instance>_*.json`, and the ADSP firmware carries the driver strings.
 
-| Function | Part | Evidence |
-|---|---|---|
-| Accelerometer #1 | **Bosch BMA4xy** (BMA4xx family) | registry entry `jsonsky_bma4xy_first_0` |
-| Accelerometer #2 | **ST LIS2HH12** | registry `jsonsky_lis2hh12_second_0`; `lis2hh12` ×153 in `adsp.b*` |
-| Gyroscope / 6-axis | **ST LSM6DST** | `lsm6dst` ×10 in the vendor image |
-| Magnetometer | **MEMSIC MMC56X3** *or* **QST QMC630x** | registry `jsonsky_mmc56x3x_0_`, `jsonsky_qmc630x_0_` (supplier variants) |
-| ALS + proximity | **Semtech SX933x** | registry `jsonsky_sx933x_0_final` |
-| ALS (alternate) | **ROHM BU27030** | registry `jsonsky_bu27030_0` |
+The phone's own registry files were pulled from the running unit (`/vendor/etc/sensors/`,
+copies in `~/redmi125g/firmware-jp-2024/sensors/`). The `config/sky_*.json` set is what this
+device actually registers:
 
-Supplier variants mean a given unit gets one of the alternatives (that is how Xiaomi handles
-second sources); which one is fitted can only be confirmed by probing the SSC of that unit.
+| Function | Part | Registry file |
+|---|---|---|
+| Accelerometer (primary) | **Bosch BMA4xy** (BMA4xx family) | `sky_bma4xy_first_0.json` |
+| Accelerometer (secondary) | **ST LIS2HH12** | `sky_lis2hh12_second_0.json` (also `lis2hh12` ×153 in `adsp.b*`) |
+| Magnetometer | **MEMSIC MMC56X3** or **QST QMC630x** (second source) | `sky_mmc56x3x_0_{NO,WITH}-NFC.json`, `sky_qmc630x_0_{NO,WITH}-NFC.json` |
+| Ambient light | **ROHM BU27030** | `sky_bu27030_0.json` |
+| Proximity / ALS combo | **Semtech SX933x** | `sky_sx933x_0_final.json` |
+| Gyroscope | **none** | there is no `sky_*gyro*` registry entry — the phone has no gyro (the `lsm6dst` strings in the vendor image are generic library support) |
+
+The `{NO,WITH}-NFC` variants confirm the board exists in NFC and non-NFC configurations; the
+JP unit sold here **has NFC** (`libnfc-SN220.conf`, `libnfc-mtp-SN100*.conf`,
+`vendor.nxp.hardware.nfc@2.0-service` and `init_nfc_sn1xxx.rc` are all present in `/vendor`,
+see §2).
 
 ## 4. Cameras — which sensors the board supports
 
