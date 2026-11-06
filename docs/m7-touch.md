@@ -10,7 +10,7 @@ what has actually been validated:
 | panel `m19` (Tianma M19 module, 1080×2460 IPS LCD) only | this unit | no other panel or regional variant has been tried; coordinates and the panel-follower link are specific to this panel |
 | **45-minute continuous run** without a second firmware reset | `docs/handoff-touch-driver-20261104/evidence/boot-and-stability.log` | one recovery during the first initialisation is normal (see below) |
 | display off → on re-initialises the IC | `echo 4 > /sys/class/graphics/fb0/blank; sleep 5; echo 0 > …` then a fresh `Touch IC fw loaded ok` | works on hardware; still new code |
-| Japanese-market Redmi 12 5G (`sky`), stock `V14.0.7.0.TMWINXM` | whole project | other variants of the same model may use a different touch controller/panel |
+| Japanese-market Redmi 12 5G (`sky`), stock `sky_jp_global_images_OS1.0.13.0.UMWJPXM_14.0` (HyperOS 1.0.13 / Android 14) | whole project | other variants of the same model may use a different touch controller/panel |
 | `sky-report` shows the IC in `NORMAL_RUN` (`state=a3…`), IRQ ≈ 12/s idle | `dmesg`, `/proc/interrupts` | — |
 
 **Known risk: touch can still drop.** Two distinct causes were found and fixed in the

@@ -2,7 +2,8 @@
 
 > **Scope of this project (state it in anything you publish).** Everything in this
 > repository was developed and verified on the **Japanese-market** Xiaomi Redmi 12 5G
-> (`sky`, SM4450 "ravelin"), stock firmware **V14.0.7.0.TMWINXM** (Android 13). Other
+> (`sky`, SM4450 "ravelin"), stock firmware
+> **`sky_jp_global_images_OS1.0.13.0.UMWJPXM_14.0`** (HyperOS 1.0.13 / Android 14). Other
 > regional variants of the same model may differ in panel, touch controller, PMIC rails,
 > modem/WLAN firmware and partition layout — do not present any value here as universal.
 >

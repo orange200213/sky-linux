@@ -1,7 +1,8 @@
 # Hardware notes — Xiaomi Redmi 12 5G (`sky`), SM4450
 
 > **Scope: one variant.** All values below were measured on the **Japanese-market
-> Redmi 12 5G** (`sky`, SM4450), stock **V14.0.7.0.TMWINXM** (Android 13). The
+> Redmi 12 5G** (`sky`, SM4450), stock **`sky_jp_global_images_OS1.0.13.0.UMWJPXM_14.0`**
+> (HyperOS 1.0.13 / Android 14). The
 > Redmi 12 5G was sold in several regions and variants of the same name can differ
 > in panel, touch controller, PMIC rails, modem/WLAN firmware and partition
 > layout — verify before trusting a value on another unit.

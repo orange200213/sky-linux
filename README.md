@@ -2,8 +2,9 @@
 
 > **Tested on one variant only.** Everything in this repository was developed and
 > verified on the **Japanese-market Xiaomi Redmi 12 5G** (codename `sky`, SoC
-> SM4450 / "ravelin"), stock firmware **V14.0.7.0.TMWINXM** (Android 13). Other
-> regional variants of the same model share the name but can differ in panel,
+> SM4450 / "ravelin"), stock firmware
+> **`sky_jp_global_images_OS1.0.13.0.UMWJPXM_14.0`** (HyperOS 1.0.13 / Android 14).
+> Other regional variants of the same model share the name but can differ in panel,
 > touch controller, PMIC rails, modem/WLAN firmware and partition layout, so treat
 > every value here as "measured on that unit" until someone confirms it on
 > another variant.
@@ -107,7 +108,7 @@ fastboot flash boot_a /path/to/stock/boot.img
 | Storage | UFS 4.0, 2 lanes, `/dev/sda` = 117 GiB LUN with `userdata` (108 GiB) |
 | USB | dwc3 + SNPS femto HS PHY (no USB3 here) |
 | PMIC | PM6450 (+ PMK8350 RTC/ADC, PM7250B charger) |
-| Variant tested | Japanese-market Redmi 12 5G (`sky`), stock **V14.0.7.0.TMWINXM**; panel/touch/firmware values are from that unit only |
+| Variant tested | Japanese-market Redmi 12 5G (`sky`), stock **`sky_jp_global_images_OS1.0.13.0.UMWJPXM_14.0`** (HyperOS 1.0.13 / Android 14); panel/touch/firmware values are from that unit only |
 | Firmware | UEFI (EDK2) on `uefi_a`, application processors start via PSCI |
 
 Details: `docs/hardware.md`.
