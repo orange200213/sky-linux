@@ -50,6 +50,7 @@ chmod +x /bin/reboot /bin/poweroff /bin/halt /bin/shutdown
 # a plain SIGTERM (``reboot`` from another shell, container stop, ...) powers off
 trap 'sync; umount /mnt 2>/dev/null; /bin/busybox poweroff -f' TERM INT
 $BB mkdir -p /var/empty /run/sshd /etc/ssh
+$BB echo "SKY_STAGE INITRAMFS_USERLAND_UP" > /dev/kmsg
 $BB echo "sky-m3c: userland up" > /dev/kmsg
 
 dump_usb() {
@@ -82,6 +83,7 @@ $BB ln -s $G/functions/ncm.usb0 $G/configs/c.1/ncm.usb0 2>/dev/null
 UDC=$($BB ls /sys/class/udc 2>/dev/null | $BB head -n 1)
 if [ -n "$UDC" ]; then
 	$BB echo "$UDC" > $G/UDC
+	$BB echo "SKY_STAGE USB_GADGET_BOUND UDC=$UDC" > /dev/kmsg
 	$BB echo "sky-m3c: gadget bound to $UDC" > /dev/kmsg
 else
 	$BB echo "sky-m3c: no UDC!" > /dev/kmsg
@@ -101,15 +103,69 @@ opt router 192.168.7.1
 opt dns 192.168.7.1
 CONF
 $BEX udhcpd /tmp/udhcpd.conf
+$BB echo "SKY_STAGE USB_NCM_NETWORK_UP" > /dev/kmsg
 $BB echo "sky-m3c: usb0=192.168.7.1/24, dhcp server up" > /dev/kmsg
 
+# ---- hand over to the rootfs on UFS when it is usable ----
+# ---- UFS: mount the linuxroot partition (ext4) as the real root ----
+# The disk is split: "userdata" (2 GiB) belongs to the stock Android image, and
+# our rootfs lives on a separate "linuxroot" partition. Never touch userdata
+# here - Android encrypts it (FBE) and the kernel would not understand it.
+$BB mkdir -p /mnt
+ROOTDEV=""
+n=0
+while [ $n -lt 20 ]; do
+	for d in /dev/sda*; do
+		case "${d##*/}" in sda[0-9]*) ;; *) continue ;; esac
+		if $BB grep -q '^PARTNAME=linuxroot$' "/sys/class/block/${d##*/}/uevent" 2>/dev/null; then
+			ROOTDEV=$d; break
+		fi
+	done
+	[ -n "$ROOTDEV" ] && break
+	[ -b /dev/sda21 ] && { ROOTDEV=/dev/sda21; break; }
+	$BB sleep 1; n=$((n+1))
+done
+if [ -n "$ROOTDEV" ] && $BB mount -t ext4 "$ROOTDEV" /mnt 2>/dev/null; then
+	$BB mkdir -p /mnt/log
+	$BB dmesg > /mnt/log/dmesg-last.txt 2>/dev/null
+	$BB echo "sky: mounted $ROOTDEV (linuxroot), log saved to /mnt/log/dmesg-last.txt" > /dev/kmsg
+else
+	$BB echo "sky: linuxroot mount failed (dev=$ROOTDEV)" > /dev/kmsg
+fi
+
+# The rootfs lives in the skyroot/ directory of the linuxroot partition, the
+# same layout userdata used before the split. A rootfs unpacked at the
+# partition root is still accepted.
+ROOT=""
+[ -x /mnt/skyroot/init ] && ROOT=/mnt/skyroot
+[ -z "$ROOT" ] && [ -x /mnt/init ] && ROOT=/mnt
+
+if [ -n "$ROOT" ]; then
+	$BB echo "sky: switching root to $ROOT (linuxroot)" > /dev/kmsg
+	$BB mkdir -p $ROOT/proc $ROOT/sys $ROOT/dev
+	$BB mount --bind $ROOT $ROOT 2>/dev/null
+	$BB mount --move /proc $ROOT/proc 2>/dev/null
+	$BB mount --move /sys  $ROOT/sys  2>/dev/null
+	$BB mount --move /dev  $ROOT/dev  2>/dev/null
+	exec $BB switch_root $ROOT /init
+	$BB echo "sky: switch_root failed, staying in the initramfs" > /dev/kmsg
+else
 # ---- ssh ----
+# Reuse the rootfs host keys when the UFS rootfs is available, so this sshd and
+# the one started after switch_root present the same host identity. Otherwise
+# every initramfs boot would invent a new fingerprint.
+if [ -d /mnt/skyroot/etc/ssh ]; then
+	$BB cp -f /mnt/skyroot/etc/ssh/ssh_host_* /etc/ssh/ 2>/dev/null
+elif [ -d /mnt/etc/ssh ]; then
+	$BB cp -f /mnt/etc/ssh/ssh_host_* /etc/ssh/ 2>/dev/null
+fi
 [ -f /etc/ssh/ssh_host_ed25519_key ] || /bin/ssh-keygen -A >/dev/null 2>&1
 $BB mkdir -p /run/sshd
 $BB mkdir -p /usr/lib/ssh
 /sbin/sshd -f /etc/ssh/sshd_config -E /tmp/sshd.log
 $BB sleep 1
 if $BB netstat -ltn 2>/dev/null | $BB grep -q ':22 '; then
+	$BB echo "SKY_STAGE SSH_READY" > /dev/kmsg
 	$BB echo "sky-m3c: sshd listening on :22" > /dev/kmsg
 else
 	$BB echo "sky-m3c: sshd FAILED" > /dev/kmsg
@@ -131,18 +187,7 @@ $BB sleep 2
 	$BB cat /proc/partitions
 } > /dev/kmsg 2>/dev/null
 
-# ---- UFS: mount userdata (ext4) read/write as persistent storage ----
-$BB mkdir -p /mnt
-n=0
-while [ ! -b /dev/sda20 ] && [ $n -lt 20 ]; do $BB sleep 1; n=$((n+1)); done
-if [ -b /dev/sda20 ]; then
-	$BB mount -t ext4 /dev/sda20 /mnt 2>/dev/null && {
-		$BB mkdir -p /mnt/skyroot /mnt/log
-		$BB dmesg > /mnt/log/dmesg-last.txt 2>/dev/null
-		$BB echo "sky: ufs mounted, log saved to /mnt/log/dmesg-last.txt" > /dev/kmsg
-	} || $BB echo "sky: mount /dev/sda20 failed" > /dev/kmsg
-else
-	$BB echo "sky: no /dev/sda20" > /dev/kmsg
+
 fi
 
 dump_usb

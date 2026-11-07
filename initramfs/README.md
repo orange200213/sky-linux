@@ -1,8 +1,28 @@
 # initramfs — the tiny userland
 
 `init` is PID 1. It mounts the pseudo filesystems, installs busybox applets,
-builds the USB gadget (CDC ACM + NCM), starts DHCP and sshd, mounts UFS and runs
-a root shell on `/dev/ttyGS0`.
+builds the USB gadget (CDC ACM + NCM), starts DHCP and sshd, mounts the rootfs
+partition and `switch_root`s into it.
+
+## Root filesystem location (2026-11-07 layout)
+
+`userdata` is **not** ours any more: the disk was split so stock Android can boot
+alongside Linux, and `userdata` (partition 20, 8 GiB) belongs to it.
+
+| partition | size | name | owner |
+|---|---|---|---|
+| 20 | 8 GiB | `userdata` | stock HyperOS (Android formats it, FBE) |
+| 21 | 99.9 GiB | `linuxroot` | our rootfs in a **`skyroot/` directory** |
+
+`init` therefore finds the partition whose `/sys/class/block/<dev>/uevent`
+contains `PARTNAME=linuxroot` (falling back to `/dev/sda21`), mounts it at `/mnt`,
+writes `dmesg` to `/mnt/log/`, then picks the root as `/mnt/skyroot` if that has an
+`init`, else `/mnt` itself (a rootfs unpacked at the partition root). Before
+`switch_root` it creates `proc/ sys/ dev/` inside the chosen root and moves the
+three mounts there — forgetting that step leaves the new root without `/proc`.
+
+`userdata` is never mounted by Linux: Android encrypts it and the kernel cannot
+use it anyway.
 
 ## Building the image
 
