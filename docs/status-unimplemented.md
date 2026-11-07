@@ -73,7 +73,23 @@ The camera HAL ships one module per sensor variant, and the names carry the part
 So the phone is a 50 MP main + 2 MP aux + (8 MP or 5 MP) front design with **three
 second-source options for the main camera**.
 
-### Which main camera does *our* unit have? Not determinable from the images
+### Which cameras does *our* unit actually have? — answered from the running HyperOS
+
+Booted the stock Android 14 image on this unit and read the camera characteristics
+(`adb shell dumpsys media.camera`):
+
+| camera | facing | active array | verdict |
+|---|---|---|---|
+| 0 (main) | back | 4080×3072 (12.5 MP binned → 50 MP full, 8160×6144) | **Samsung S5KJN1** — the reported physical size 5.304×3.994 mm matches a 1/2.76", 0.64 µm sensor (OV50D40 is 1/2.88", SC520CS 1/2.5", both off by ≥0.3 mm). Module vendor is **AAC or Sunny** (both goldens ship: `golden_aac_s5kjn1_wide_ii.bin`, `golden_sunny_s5kjn1_wide_i.bin`) |
+| 1 (front) | front | 2592×1944 (5 MP) | **Samsung S5K5E9YU05** (the OV8856 alternative is 8 MP / 3264×2448, so it is *not* fitted) |
+| 2 (aux) | back | 1600×1200 (2 MP) | **OV02B10 or OV2180** (both are 2 MP; needs an EEPROM read to separate) |
+| 3–5 | — | duplicates of the above | CamX exposes extra logical/physical ids |
+
+So the phone is 50 MP main (S5KJN1) + 2 MP aux + 5 MP front, not the 8 MP front /
+OV50D40 combination that the module list alone suggested.
+
+The rest of this section records what was tried *before* Android was booted, i.e. why the
+images alone could not answer it.
 
 Checked and ruled out (2026-11-06, in TWRP):
 
